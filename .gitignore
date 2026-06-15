@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+*.bin
+*.img
+.DS_Store
+Thumbs.db
+
+# diagnostic / scratch artifacts (keep curated images in docs/)
+*.ppm
+*.log
+serialout.txt
+_diag_*.py
+/screen.png

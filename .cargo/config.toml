@@ -1,0 +1,18 @@
+# Build the Rust core library for our bare-metal target (it isn't shipped
+# precompiled for a custom target). `compiler-builtins-mem` gives us memcpy/
+# memset/etc. that the compiler expects to exist.
+[unstable]
+build-std-features = ["compiler-builtins-mem"]
+build-std = ["core", "compiler_builtins"]
+
+# `x86_64-unknown-none` is Rust's built-in freestanding x86-64 target: no host
+# OS, red zone disabled, SSE/MMX off (soft-float) — exactly what a kernel needs.
+[build]
+target = "x86_64-unknown-none"
+
+# `cargo run` builds a bootable disk image (via bootimage) and launches QEMU.
+# `relocation-model=static` disables the position-independent (PIE) linking that
+# `x86_64-unknown-none` defaults to — bootloader 0.9 needs a static kernel.
+[target.'cfg(target_os = "none")']
+runner = "bootimage runner"
+rustflags = ["-C", "relocation-model=static"]
