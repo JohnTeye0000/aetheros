@@ -6,9 +6,11 @@
 
 #![no_std] // don't link the Rust standard library — there's no OS to provide it
 #![no_main] // we define our own entry point, not the usual runtime `main`
+#![feature(abi_x86_interrupt)] // unstable ABI needed to write CPU exception handlers
 
 use core::panic::PanicInfo;
 
+mod interrupts;
 mod serial;
 mod vga_buffer;
 use vga_buffer::Color;
@@ -43,13 +45,27 @@ pub extern "C" fn _start() -> ! {
     boot_log!("[ uart ] mirroring kernel log to serial COM1");
     boot_log!("");
 
+    // --- Stage 1: CPU exception handling (IDT) --------------------------
+    // Install handlers so the CPU can recover from exceptions instead of
+    // triple-faulting, then prove it by deliberately raising a breakpoint.
+    vga_buffer::WRITER
+        .lock()
+        .set_color(Color::Yellow, Color::Black);
+    boot_log!("");
+    boot_log!("[ idt  ] loading the interrupt descriptor table");
+    interrupts::init();
+    boot_log!("[ idt  ] raising a breakpoint exception (int3) on purpose...");
+    x86_64::instructions::interrupts::int3();
+    boot_log!("[ idt  ] ...and we are back - the CPU recovered cleanly");
+
     vga_buffer::WRITER
         .lock()
         .set_color(Color::LightGreen, Color::Black);
-    boot_log!("Stage 0 complete. Kernel is alive. Halting.");
+    boot_log!("");
+    boot_log!("Stage 1 complete. Exceptions handled. Kernel still alive. Halting.");
 
-    // Nothing to do yet — park the CPU. (A real `hlt` loop arrives with the
-    // interrupt milestone; for now we just spin.)
+    // Nothing left to do yet — park the CPU. (A real `hlt` loop arrives with the
+    // hardware-interrupt milestone; for now we just spin.)
     loop {}
 }
 

@@ -13,13 +13,14 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Boots** — a freestanding `#![no_std]` / `#![no_main]` binary; the bootloader jumps to our `_start`.
 - [x] **VGA text driver** — writes characters directly to the text buffer at physical `0xb8000`, with scrolling, colour, and `print!` / `println!` macros.
 - [x] **Serial driver** — a UART 16550 (COM1) driver with `serial_println!`, mirroring the kernel log to the host so the boot can be verified headlessly.
+- [x] **CPU exceptions (IDT)** — an Interrupt Descriptor Table with a breakpoint (`#BP`) handler and a double-fault handler. The kernel raises an `int3` on purpose, handles it, and resumes — the first time it survives an exception instead of triple-faulting.
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
 Booted in QEMU — VGA output (this is a screenshot of the emulated screen):
 
-![AetherOS kernel booting](docs/boot-stage0.png)
+![AetherOS kernel booting](docs/boot-stage1.png)
 
 …and the same log captured over the serial port:
 
@@ -31,14 +32,19 @@ AetherOS  //  bare-metal x86-64 kernel
 [ vga  ] writing directly to text buffer @ 0xb8000
 [ uart ] mirroring kernel log to serial COM1
 
-Stage 0 complete. Kernel is alive. Halting.
+[ idt  ] loading the interrupt descriptor table
+[ idt  ] raising a breakpoint exception (int3) on purpose...
+[ idt  ] breakpoint (#BP) handled at instruction 0x208471
+[ idt  ] ...and we are back - the CPU recovered cleanly
+
+Stage 1 complete. Exceptions handled. Kernel still alive. Halting.
 ```
 
 ## The build arc (the roadmap)
 
 Each item is a real, independently-committable capability — built in order, roughly the classic OS-dev progression:
 
-- [ ] CPU exceptions via an Interrupt Descriptor Table (IDT)
+- [x] CPU exceptions via an Interrupt Descriptor Table (IDT)
 - [ ] Hardware interrupts (PIC) + a periodic timer
 - [ ] PS/2 keyboard input
 - [ ] Physical memory: paging, a frame allocator
@@ -72,8 +78,9 @@ cargo run
 src/main.rs        kernel entry point (_start) + panic handler
 src/vga_buffer.rs  VGA text-mode driver and print macros
 src/serial.rs      UART 16550 serial driver (host-side logging)
+src/interrupts.rs  IDT + CPU exception handlers
 .cargo/config.toml build-std + target + bootimage runner config
-docs/              boot screenshots / proof
+docs/              boot screenshots + devlog/ (plain-English notes per milestone)
 ```
 
 ## Credit & approach
