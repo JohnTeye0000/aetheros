@@ -156,5 +156,12 @@ macro_rules! println {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    WRITER.lock().write_fmt(args).unwrap();
+    // Hold the lock with interrupts OFF. Otherwise the timer interrupt could
+    // fire mid-print while we hold WRITER, and its handler — which also prints —
+    // would spin forever waiting for a lock that can't be released. Disabling
+    // interrupts for the brief moment we hold the lock makes printing
+    // interrupt-safe.
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        WRITER.lock().write_fmt(args).unwrap();
+    });
 }

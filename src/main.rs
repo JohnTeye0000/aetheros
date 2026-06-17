@@ -58,15 +58,29 @@ pub extern "C" fn _start() -> ! {
     x86_64::instructions::interrupts::int3();
     boot_log!("[ idt  ] ...and we are back - the CPU recovered cleanly");
 
+    // --- Stage 2: hardware interrupts (PIC + timer) ---------------------
+    // Bring the 8259 PIC online and enable interrupts. From here on, the timer
+    // chip fires at the CPU on its own ~18 times a second — execution is now
+    // driven by hardware, not just our straight-line code.
+    vga_buffer::WRITER
+        .lock()
+        .set_color(Color::LightCyan, Color::Black);
+    boot_log!("");
+    boot_log!("[ pic  ] remapping the 8259 PIC and enabling hardware interrupts");
+    interrupts::init_hardware();
+    boot_log!("[ pic  ] interrupts live - the timer is now driving the CPU:");
+    boot_log!("");
+
     vga_buffer::WRITER
         .lock()
         .set_color(Color::LightGreen, Color::Black);
-    boot_log!("");
-    boot_log!("Stage 1 complete. Exceptions handled. Kernel still alive. Halting.");
 
-    // Nothing left to do yet — park the CPU. (A real `hlt` loop arrives with the
-    // hardware-interrupt milestone; for now we just spin.)
-    loop {}
+    // Idle in a halt loop: `hlt` stops the core until the NEXT interrupt
+    // arrives, so we sleep between timer ticks instead of burning 100% CPU.
+    // This is how a real kernel waits for work.
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 /// Called by the compiler when anything panics. In a kernel there is no one

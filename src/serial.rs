@@ -22,10 +22,15 @@ lazy_static! {
 #[doc(hidden)]
 pub fn _print(args: core::fmt::Arguments) {
     use core::fmt::Write;
-    SERIAL1
-        .lock()
-        .write_fmt(args)
-        .expect("printing to serial failed");
+    // Same interrupt-safety reasoning as the VGA writer: hold the serial lock
+    // with interrupts disabled so the timer handler (which also logs to serial)
+    // can never deadlock against an in-progress print.
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        SERIAL1
+            .lock()
+            .write_fmt(args)
+            .expect("printing to serial failed");
+    });
 }
 
 /// Print to the host via the serial port (no newline).

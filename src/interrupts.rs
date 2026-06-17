@@ -12,8 +12,47 @@
 //! handler functions, load it into the CPU, and now the processor can *recover*
 //! from an exception instead of rebooting.
 
+use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
+use pic8259::ChainedPics;
+use spin::Mutex;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
+
+// --- Hardware interrupts (8259 PIC) -------------------------------------
+//
+// A PC has two chained 8259 PIC chips that funnel hardware interrupt lines
+// (IRQs) from devices — timer, keyboard, disk — into the CPU. By default they
+// deliver IRQs on vectors 0..15, but the CPU already reserves vectors 0..31 for
+// exceptions (vector 8 = double fault!). So step one is to *remap* the PICs to
+// land just above the exceptions, at 32..47.
+pub const PIC_1_OFFSET: u8 = 32;
+pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8; // 40
+
+/// The two cascaded PICs, behind a spinlock. `ChainedPics::new` is `unsafe`
+/// because wrong offsets would misroute interrupts; ours are correct (32/40).
+pub static PICS: Mutex<ChainedPics> =
+    Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+
+/// Which interrupt vector each device's IRQ is remapped to. IRQ0 (the timer)
+/// becomes vector 32; IRQ1 (the keyboard, next milestone) will be 33.
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub enum InterruptIndex {
+    Timer = PIC_1_OFFSET,
+}
+
+impl InterruptIndex {
+    fn as_u8(self) -> u8 {
+        self as u8
+    }
+    fn as_usize(self) -> usize {
+        usize::from(self.as_u8())
+    }
+}
+
+/// How many timer interrupts have fired since boot. `AtomicU64` so the handler
+/// can update it without a lock (a plain `static mut` would be `unsafe`).
+static TICKS: AtomicU64 = AtomicU64::new(0);
 
 lazy_static! {
     /// The single IDT for the whole kernel. The CPU only stores a *pointer* to
@@ -25,6 +64,8 @@ lazy_static! {
         // Vector 3: breakpoint. Vector 8: double fault.
         idt.breakpoint.set_handler_fn(breakpoint_handler);
         idt.double_fault.set_handler_fn(double_fault_handler);
+        // Vector 32: the timer IRQ (IRQ0), now that the PIC is remapped there.
+        idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         idt
     };
 }
@@ -33,6 +74,36 @@ lazy_static! {
 /// exceptions are dispatched to the handlers below instead of escalating.
 pub fn init() {
     IDT.load();
+}
+
+/// Bring the hardware interrupts online: remap + initialise the PICs, then run
+/// `sti` to actually let the CPU accept interrupts. After this, the timer chip
+/// starts firing IRQ0 at us ~18.2 times a second with no further help from us.
+///
+/// `PICS.initialize()` is `unsafe` because talking to the wrong I/O ports could
+/// wedge the interrupt controller — but our offsets are the correct 32/40.
+pub fn init_hardware() {
+    unsafe { PICS.lock().initialize() };
+    x86_64::instructions::interrupts::enable();
+}
+
+/// Timer interrupt (IRQ0 → vector 32). Fired by the PIT roughly 18.2 times per
+/// second. We print the first few ticks as proof the hardware is driving us,
+/// then go quiet so we don't flood the log.
+///
+/// The non-negotiable last step is `notify_end_of_interrupt`: the PIC waits for
+/// this "I'm done" signal before it will deliver the *next* interrupt on that
+/// line. Forget it and the timer fires exactly once, then silence forever.
+extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let tick = TICKS.fetch_add(1, Ordering::SeqCst) + 1;
+    if tick <= 5 {
+        crate::println!("[ irq  ] timer tick #{} (hardware woke the CPU)", tick);
+        crate::serial_println!("[ irq  ] timer interrupt fired - tick #{}", tick);
+    }
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+    }
 }
 
 /// Breakpoint exception (`#BP`, vector 3) — raised by the one-byte `int3`

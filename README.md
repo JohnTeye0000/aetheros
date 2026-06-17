@@ -14,13 +14,14 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **VGA text driver** — writes characters directly to the text buffer at physical `0xb8000`, with scrolling, colour, and `print!` / `println!` macros.
 - [x] **Serial driver** — a UART 16550 (COM1) driver with `serial_println!`, mirroring the kernel log to the host so the boot can be verified headlessly.
 - [x] **CPU exceptions (IDT)** — an Interrupt Descriptor Table with a breakpoint (`#BP`) handler and a double-fault handler. The kernel raises an `int3` on purpose, handles it, and resumes — the first time it survives an exception instead of triple-faulting.
+- [x] **Hardware interrupts (PIC + timer)** — the 8259 PIC is remapped (vectors 32+) and interrupts are enabled; the PIT timer fires IRQ0 ~18×/sec and the kernel handles each tick (with End-Of-Interrupt) while idling in a `hlt` loop. Execution is now driven by hardware. Printing was made interrupt-safe (locks held with interrupts disabled) to avoid deadlock.
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
-Booted in QEMU — VGA output (this is a screenshot of the emulated screen):
+Booted in QEMU — VGA output (this is a screenshot of the emulated screen). The five `timer tick` lines are fired by the hardware timer *after* the kernel goes idle:
 
-![AetherOS kernel booting](docs/boot-stage1.png)
+![AetherOS kernel booting](docs/boot-stage2.png)
 
 …and the same log captured over the serial port:
 
@@ -34,10 +35,17 @@ AetherOS  //  bare-metal x86-64 kernel
 
 [ idt  ] loading the interrupt descriptor table
 [ idt  ] raising a breakpoint exception (int3) on purpose...
-[ idt  ] breakpoint (#BP) handled at instruction 0x208471
+[ idt  ] breakpoint (#BP) handled at instruction 0x20b031
 [ idt  ] ...and we are back - the CPU recovered cleanly
 
-Stage 1 complete. Exceptions handled. Kernel still alive. Halting.
+[ pic  ] remapping the 8259 PIC and enabling hardware interrupts
+[ pic  ] interrupts live - the timer is now driving the CPU:
+
+[ irq  ] timer interrupt fired - tick #1
+[ irq  ] timer interrupt fired - tick #2
+[ irq  ] timer interrupt fired - tick #3
+[ irq  ] timer interrupt fired - tick #4
+[ irq  ] timer interrupt fired - tick #5
 ```
 
 ## The build arc (the roadmap)
@@ -45,7 +53,7 @@ Stage 1 complete. Exceptions handled. Kernel still alive. Halting.
 Each item is a real, independently-committable capability — built in order, roughly the classic OS-dev progression:
 
 - [x] CPU exceptions via an Interrupt Descriptor Table (IDT)
-- [ ] Hardware interrupts (PIC) + a periodic timer
+- [x] Hardware interrupts (PIC) + a periodic timer
 - [ ] PS/2 keyboard input
 - [ ] Physical memory: paging, a frame allocator
 - [ ] A kernel heap + allocator (`alloc` support: `Box`, `Vec`)
