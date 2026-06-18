@@ -69,11 +69,14 @@ pub extern "C" fn _start() -> ! {
     boot_log!("[ pic  ] remapping the 8259 PIC and enabling hardware interrupts");
     interrupts::init_hardware();
     boot_log!("[ pic  ] interrupts live - the timer is now driving the CPU:");
+    boot_log!("[ kbd  ] PS/2 keyboard armed - type and the kernel echoes you back");
     boot_log!("");
 
     vga_buffer::WRITER
         .lock()
         .set_color(Color::LightGreen, Color::Black);
+    boot_log!("Stage 3 live. Timer + keyboard interrupts active. Listening for keys...");
+    boot_log!("");
 
     // Idle in a halt loop: `hlt` stops the core until the NEXT interrupt
     // arrives, so we sleep between timer ticks instead of burning 100% CPU.

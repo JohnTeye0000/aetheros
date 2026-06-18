@@ -15,21 +15,24 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Serial driver** — a UART 16550 (COM1) driver with `serial_println!`, mirroring the kernel log to the host so the boot can be verified headlessly.
 - [x] **CPU exceptions (IDT)** — an Interrupt Descriptor Table with a breakpoint (`#BP`) handler and a double-fault handler. The kernel raises an `int3` on purpose, handles it, and resumes — the first time it survives an exception instead of triple-faulting.
 - [x] **Hardware interrupts (PIC + timer)** — the 8259 PIC is remapped (vectors 32+) and interrupts are enabled; the PIT timer fires IRQ0 ~18×/sec and the kernel handles each tick (with End-Of-Interrupt) while idling in a `hlt` loop. Execution is now driven by hardware. Printing was made interrupt-safe (locks held with interrupts disabled) to avoid deadlock.
+- [x] **PS/2 keyboard input** — IRQ1 is unmasked and handled; raw scancodes are read from port `0x60` and decoded (via `pc-keyboard`) into characters, which the kernel echoes to the screen. The first time the kernel reacts to *you*.
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
-Booted in QEMU — VGA output (this is a screenshot of the emulated screen). The five `timer tick` lines are fired by the hardware timer *after* the kernel goes idle:
+Booted in QEMU, then "aetheros" was typed into it — the kernel echoes the
+keystrokes back (bottom line). The `timer tick` lines are fired by the hardware
+timer *after* the kernel goes idle:
 
-![AetherOS kernel booting](docs/boot-stage2.png)
+![AetherOS kernel booting and echoing typed input](docs/boot-stage3.png)
 
-…and the same log captured over the serial port:
+…and the same session captured over the serial port (timer ticks interleave
+with the keys typed in):
 
 ```
 AetherOS  //  bare-metal x86-64 kernel
 
 [ boot ] handed control by the bootloader at _start
-[ boot ] no OS beneath us - the machine is ours
 [ vga  ] writing directly to text buffer @ 0xb8000
 [ uart ] mirroring kernel log to serial COM1
 
@@ -39,13 +42,19 @@ AetherOS  //  bare-metal x86-64 kernel
 [ idt  ] ...and we are back - the CPU recovered cleanly
 
 [ pic  ] remapping the 8259 PIC and enabling hardware interrupts
-[ pic  ] interrupts live - the timer is now driving the CPU:
+[ kbd  ] PS/2 keyboard armed - type and the kernel echoes you back
 
-[ irq  ] timer interrupt fired - tick #1
-[ irq  ] timer interrupt fired - tick #2
-[ irq  ] timer interrupt fired - tick #3
-[ irq  ] timer interrupt fired - tick #4
-[ irq  ] timer interrupt fired - tick #5
+Stage 3 live. Timer + keyboard interrupts active. Listening for keys...
+
+[ irq  ] timer interrupt fired - tick #1 ... #5
+[ kbd  ] key pressed -> 'a'
+[ kbd  ] key pressed -> 'e'
+[ kbd  ] key pressed -> 't'
+[ kbd  ] key pressed -> 'h'
+[ kbd  ] key pressed -> 'e'
+[ kbd  ] key pressed -> 'r'
+[ kbd  ] key pressed -> 'o'
+[ kbd  ] key pressed -> 's'
 ```
 
 ## The build arc (the roadmap)
@@ -54,7 +63,7 @@ Each item is a real, independently-committable capability — built in order, ro
 
 - [x] CPU exceptions via an Interrupt Descriptor Table (IDT)
 - [x] Hardware interrupts (PIC) + a periodic timer
-- [ ] PS/2 keyboard input
+- [x] PS/2 keyboard input
 - [ ] Physical memory: paging, a frame allocator
 - [ ] A kernel heap + allocator (`alloc` support: `Box`, `Vec`)
 - [ ] Cooperative, then preemptive, multitasking
@@ -86,7 +95,7 @@ cargo run
 src/main.rs        kernel entry point (_start) + panic handler
 src/vga_buffer.rs  VGA text-mode driver and print macros
 src/serial.rs      UART 16550 serial driver (host-side logging)
-src/interrupts.rs  IDT + CPU exception handlers
+src/interrupts.rs  IDT, CPU exceptions, PIC, timer + keyboard handlers
 .cargo/config.toml build-std + target + bootimage runner config
 docs/              boot screenshots + devlog/ (plain-English notes per milestone)
 ```

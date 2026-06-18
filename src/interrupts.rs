@@ -14,6 +14,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
+use pc_keyboard::{layouts, HandleControl, Keyboard, ScancodeSet1};
 use pic8259::ChainedPics;
 use spin::Mutex;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
@@ -38,7 +39,8 @@ pub static PICS: Mutex<ChainedPics> =
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum InterruptIndex {
-    Timer = PIC_1_OFFSET,
+    Timer = PIC_1_OFFSET,        // IRQ0 -> vector 32
+    Keyboard = PIC_1_OFFSET + 1, // IRQ1 -> vector 33
 }
 
 impl InterruptIndex {
@@ -66,8 +68,18 @@ lazy_static! {
         idt.double_fault.set_handler_fn(double_fault_handler);
         // Vector 32: the timer IRQ (IRQ0), now that the PIC is remapped there.
         idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
+        // Vector 33: the keyboard IRQ (IRQ1).
+        idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt
     };
+
+    /// The keyboard decoder, behind a spinlock. A PS/2 keyboard sends raw
+    /// "scancodes" (one number per key press/release, in "set 1" encoding); this
+    /// state machine turns the stream of scancodes into actual characters,
+    /// tracking shift/caps and applying a US layout.
+    static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> = Mutex::new(
+        Keyboard::new(ScancodeSet1::new(), layouts::Us104Key, HandleControl::Ignore)
+    );
 }
 
 /// Load our IDT into the CPU with the `lidt` instruction. After this returns,
@@ -84,6 +96,21 @@ pub fn init() {
 /// wedge the interrupt controller — but our offsets are the correct 32/40.
 pub fn init_hardware() {
     unsafe { PICS.lock().initialize() };
+
+    // Set the PIC interrupt masks explicitly. `initialize()` restores whatever
+    // mask the BIOS left behind, which can leave the keyboard line disabled.
+    // On the PIC's mask register a 0 bit ENABLES that IRQ. We enable IRQ0
+    // (timer), IRQ1 (keyboard), and IRQ2 (the cascade line to the second PIC),
+    // and mask everything else for now.
+    use x86_64::instructions::port::Port;
+    let mut pic1_mask: Port<u8> = Port::new(0x21); // primary PIC data port
+    let mut pic2_mask: Port<u8> = Port::new(0xA1); // secondary PIC data port
+    unsafe {
+        pic1_mask.write(0b1111_1000); // enable IRQ0, IRQ1, IRQ2
+        pic2_mask.write(0b1111_1111); // secondary PIC fully masked (unused yet)
+    }
+
+    // `sti` — from here the CPU will actually accept the interrupts we enabled.
     x86_64::instructions::interrupts::enable();
 }
 
@@ -103,6 +130,45 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+    }
+}
+
+/// Keyboard interrupt (IRQ1 → vector 33). Fires once per key press AND once per
+/// release. The PS/2 controller holds the raw scancode in I/O port 0x60, and it
+/// will NOT send another keyboard interrupt until we read that byte — so reading
+/// the port is mandatory, not optional.
+///
+/// We feed the scancode to the `pc-keyboard` decoder, which assembles it into a
+/// real character (handling multi-byte sequences, shift, caps lock, etc.), then
+/// echo that character to both the screen and the serial log.
+extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    use pc_keyboard::DecodedKey;
+    use x86_64::instructions::port::Port;
+
+    let mut keyboard = KEYBOARD.lock();
+    let mut port: Port<u8> = Port::new(0x60); // PS/2 data port
+    let scancode: u8 = unsafe { port.read() };
+
+    // add_byte feeds one scancode into the state machine; it yields a key event
+    // only once a full key is assembled. process_keyevent then maps that event
+    // (plus modifier state) to an actual character.
+    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+        if let Some(key) = keyboard.process_keyevent(key_event) {
+            match key {
+                DecodedKey::Unicode(character) => {
+                    crate::print!("{}", character); // echo inline on screen
+                    crate::serial_println!("[ kbd  ] key pressed -> '{}'", character);
+                }
+                DecodedKey::RawKey(key) => {
+                    crate::serial_println!("[ kbd  ] special key -> {:?}", key);
+                }
+            }
+        }
+    }
+
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
     }
 }
 
