@@ -5,7 +5,9 @@ edition = "2021"
 description = "AetherOS — a small x86-64 kernel written from scratch in Rust"
 
 [dependencies]
-bootloader = "0.9.23"
+# `map_physical_memory` makes the bootloader map all of RAM at a known virtual
+# offset and pass us the memory map — both needed to walk the page tables.
+bootloader = { version = "0.9.23", features = ["map_physical_memory"] }
 volatile = "0.2.6"
 spin = "0.5.2"
 lazy_static = { version = "1.0", features = ["spin_no_std"] }

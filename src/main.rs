@@ -10,7 +10,10 @@
 
 use core::panic::PanicInfo;
 
+use bootloader::{entry_point, BootInfo};
+
 mod interrupts;
+mod memory;
 mod serial;
 mod vga_buffer;
 use vga_buffer::Color;
@@ -24,12 +27,13 @@ macro_rules! boot_log {
     }};
 }
 
-/// The kernel entry point. The bootloader jumps here.
-///
-/// `extern "C"` + `#[no_mangle]` keep the name exactly `_start` so the linker
-/// can find it. It never returns (`!`) — there is nothing to return *to*.
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
+// The bootloader calls our entry point. `entry_point!` generates the real
+// `_start` symbol for us AND type-checks the signature, so we safely receive a
+// `&BootInfo` (memory map + physical-memory offset) instead of digging it out
+// of a register by hand. It never returns (`!`) — there is nothing to return to.
+entry_point!(kernel_main);
+
+fn kernel_main(boot_info: &'static BootInfo) -> ! {
     vga_buffer::WRITER
         .lock()
         .set_color(Color::LightCyan, Color::Black);
@@ -72,15 +76,57 @@ pub extern "C" fn _start() -> ! {
     boot_log!("[ kbd  ] PS/2 keyboard armed - type and the kernel echoes you back");
     boot_log!("");
 
+    boot_log!("Stage 3 live. Timer + keyboard interrupts active.");
+    boot_log!("");
+
+    // --- Stage 4: paging & physical memory ------------------------------
+    // Read the page tables the bootloader handed us, then author our own
+    // mapping to prove the kernel controls virtual memory.
+    use x86_64::structures::paging::{Page, Translate};
+    use x86_64::VirtAddr;
+
+    vga_buffer::WRITER
+        .lock()
+        .set_color(Color::Yellow, Color::Black);
+    boot_log!("[ mem  ] taking ownership of the page tables");
+
+    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let mut frame_allocator =
+        unsafe { memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
+
+    // Translate a few virtual addresses to their physical frames — proof we can
+    // read the tables. (VGA is identity-mapped; the offset maps to physical 0;
+    // the stack lives wherever the bootloader placed it.)
+    let stack_probe = 0u64;
+    let probes = [
+        ("vga buffer ", 0xb8000u64),
+        ("phys offset", boot_info.physical_memory_offset),
+        ("stack var  ", &stack_probe as *const _ as u64),
+    ];
+    for (label, addr) in probes {
+        let phys = mapper.translate_addr(VirtAddr::new(addr));
+        boot_log!("[ mem  ] {} {:#014x} -> {:?}", label, addr, phys);
+    }
+
+    // Now WRITE the tables: map an unused virtual page onto the VGA frame and
+    // write "New!" through it — text reaches the screen via a mapping we built.
+    boot_log!("[ mem  ] mapping a fresh page -> VGA frame, writing through it");
+    let page = Page::containing_address(VirtAddr::new(0xdead_beef_000));
+    memory::create_example_mapping(page, &mut mapper, &mut frame_allocator);
+    let page_ptr: *mut u64 = page.start_address().as_mut_ptr();
+    unsafe { page_ptr.offset(400).write_volatile(0x_f021_f077_f065_f04e) };
+    boot_log!("[ mem  ] 'New!' now on screen via page 0xdeadbeef000");
+    boot_log!("");
+
     vga_buffer::WRITER
         .lock()
         .set_color(Color::LightGreen, Color::Black);
-    boot_log!("Stage 3 live. Timer + keyboard interrupts active. Listening for keys...");
+    boot_log!("Stage 4 live. Kernel owns its page tables. Idling with hlt.");
     boot_log!("");
 
     // Idle in a halt loop: `hlt` stops the core until the NEXT interrupt
     // arrives, so we sleep between timer ticks instead of burning 100% CPU.
-    // This is how a real kernel waits for work.
     loop {
         x86_64::instructions::hlt();
     }
