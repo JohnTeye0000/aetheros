@@ -8,10 +8,16 @@
 #![no_main] // we define our own entry point, not the usual runtime `main`
 #![feature(abi_x86_interrupt)] // unstable ABI needed to write CPU exception handlers
 
+// Pull in the `alloc` crate — the slice of the standard library that provides
+// heap types (Box, Vec, String). It works under no_std once we supply a global
+// allocator, which the `allocator` module does.
+extern crate alloc;
+
 use core::panic::PanicInfo;
 
 use bootloader::{entry_point, BootInfo};
 
+mod allocator;
 mod interrupts;
 mod memory;
 mod serial;
@@ -122,7 +128,43 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     vga_buffer::WRITER
         .lock()
         .set_color(Color::LightGreen, Color::Black);
-    boot_log!("Stage 4 live. Kernel owns its page tables. Idling with hlt.");
+    boot_log!("Stage 4 live. Kernel owns its page tables.");
+    boot_log!("");
+
+    // --- Stage 5: a kernel heap (dynamic allocation) --------------------
+    // Map a region of pages and arm the global allocator. After this, the heap
+    // types from `alloc` — Box, Vec, String — work inside the kernel.
+    vga_buffer::WRITER
+        .lock()
+        .set_color(Color::Yellow, Color::Black);
+    boot_log!(
+        "[ heap ] mapping a {} KiB heap and arming the allocator",
+        allocator::HEAP_SIZE / 1024
+    );
+    allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap init failed");
+
+    {
+        use alloc::{boxed::Box, string::String, vec::Vec};
+
+        let boxed = Box::new(42u64);
+        boot_log!("[ heap ] Box<u64> at {:p} holds {}", boxed, *boxed);
+
+        let mut v: Vec<u64> = Vec::new();
+        for i in 1..=100 {
+            v.push(i);
+        }
+        let sum: u64 = v.iter().sum();
+        boot_log!("[ heap ] Vec of {} numbers, sum(1..=100) = {}", v.len(), sum);
+
+        let s = String::from("a heap-allocated string");
+        boot_log!("[ heap ] String: \"{}\" ({} bytes)", s, s.len());
+    }
+    boot_log!("");
+
+    vga_buffer::WRITER
+        .lock()
+        .set_color(Color::LightGreen, Color::Black);
+    boot_log!("Stage 5 live. Heap online - Box/Vec/String work. Idling with hlt.");
     boot_log!("");
 
     // Idle in a halt loop: `hlt` stops the core until the NEXT interrupt

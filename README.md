@@ -17,25 +17,21 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Hardware interrupts (PIC + timer)** — the 8259 PIC is remapped (vectors 32+) and interrupts are enabled; the PIT timer fires IRQ0 ~18×/sec and the kernel handles each tick (with End-Of-Interrupt) while idling in a `hlt` loop. Execution is now driven by hardware. Printing was made interrupt-safe (locks held with interrupts disabled) to avoid deadlock.
 - [x] **PS/2 keyboard input** — IRQ1 is unmasked and handled; raw scancodes are read from port `0x60` and decoded (via `pc-keyboard`) into characters, which the kernel echoes to the screen. The first time the kernel reacts to *you*.
 - [x] **Paging / virtual memory** — the kernel reads the active page tables (translating any virtual address to its physical frame via the recursive offset map) and **writes its own mappings**: it maps a fresh, unused virtual page onto the VGA frame and prints through it. Plus a bootloader-memory-map frame allocator. The foundation for a heap and, later, separate address spaces.
+- [x] **Kernel heap** — a 100 KiB heap region is mapped and managed by a **bump allocator written from scratch** (no external crate), registered as Rust's `#[global_allocator]`. `Box`, `Vec`, and `String` now work inside the kernel.
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
-Booted in QEMU. The black-on-white **"New!"** on the left was written through a
-brand-new virtual page the kernel mapped onto the VGA frame itself — proof it
-controls its own page tables. The `[ mem ]` lines show virtual→physical address
-translations, and the `timer tick` lines are fired by the hardware timer:
+Booted in QEMU. The black-on-white **"New!"** (left) was written through a
+brand-new virtual page the kernel mapped onto the VGA frame itself; the `[ mem ]`
+lines show virtual→physical translations; the `[ heap ]` lines show `Box`/`Vec`/
+`String` working on a heap our own allocator manages:
 
-![AetherOS kernel booting, paging, and self-mapped screen write](docs/boot-stage4.png)
+![AetherOS kernel: paging, self-mapped screen write, and a working heap](docs/boot-stage5.png)
 
 …and the key lines from the serial log:
 
 ```
-[ idt  ] ...and we are back - the CPU recovered cleanly
-[ pic  ] remapping the 8259 PIC and enabling hardware interrupts
-[ kbd  ] PS/2 keyboard armed - type and the kernel echoes you back
-[ irq  ] timer interrupt fired - tick #1 ... #5
-
 [ mem  ] taking ownership of the page tables
 [ mem  ] vga buffer  0x0000000b8000 -> Some(PhysAddr(0xb8000))
 [ mem  ] phys offset 0x018000000000 -> Some(PhysAddr(0x0))
@@ -43,10 +39,16 @@ translations, and the `timer tick` lines are fired by the hardware timer:
 [ mem  ] mapping a fresh page -> VGA frame, writing through it
 [ mem  ] 'New!' now on screen via page 0xdeadbeef000
 
-Stage 4 live. Kernel owns its page tables. Idling with hlt.
+[ heap ] mapping a 100 KiB heap and arming the allocator
+[ heap ] Box<u64> at 0x444444440000 holds 42
+[ heap ] Vec of 100 numbers, sum(1..=100) = 5050
+[ heap ] String: "a heap-allocated string" (23 bytes)
+
+Stage 5 live. Heap online - Box/Vec/String work. Idling with hlt.
 ```
 
-(Earlier stages — including typing "aetheros" into the kernel live — are in `docs/boot-stage0..3.png`.)
+(Earlier stages — exceptions, the timer, and typing "aetheros" into the kernel
+live — are in `docs/boot-stage0..4.png`.)
 
 ## The build arc (the roadmap)
 
@@ -56,7 +58,7 @@ Each item is a real, independently-committable capability — built in order, ro
 - [x] Hardware interrupts (PIC) + a periodic timer
 - [x] PS/2 keyboard input
 - [x] Physical memory: paging, a frame allocator
-- [ ] A kernel heap + allocator (`alloc` support: `Box`, `Vec`)
+- [x] A kernel heap + allocator (`alloc` support: `Box`, `Vec`)
 - [ ] Cooperative, then preemptive, multitasking
 - [ ] A tiny in-kernel shell
 - [ ] A simple ramdisk / read-only filesystem
@@ -88,6 +90,7 @@ src/vga_buffer.rs  VGA text-mode driver and print macros
 src/serial.rs      UART 16550 serial driver (host-side logging)
 src/interrupts.rs  IDT, CPU exceptions, PIC, timer + keyboard handlers
 src/memory.rs      paging: page-table access, translation, frame allocator
+src/allocator.rs   kernel heap region + hand-written bump allocator
 .cargo/config.toml build-std + target + bootimage runner config
 docs/              boot screenshots + devlog/ (plain-English notes per milestone)
 ```
