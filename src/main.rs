@@ -21,6 +21,7 @@ mod allocator;
 mod interrupts;
 mod memory;
 mod serial;
+mod task;
 mod vga_buffer;
 use vga_buffer::Color;
 
@@ -164,13 +165,47 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     vga_buffer::WRITER
         .lock()
         .set_color(Color::LightGreen, Color::Black);
-    boot_log!("Stage 5 live. Heap online - Box/Vec/String work. Idling with hlt.");
+    boot_log!("Stage 5 live. Heap online - Box/Vec/String work.");
+    boot_log!("");
+
+    // --- Stage 6: cooperative multitasking (async/await) ----------------
+    // Spawn two async tasks on a tiny round-robin executor. Each yields after
+    // every step, so the executor interleaves them: two things making progress
+    // "at once" on one CPU, cooperatively.
+    vga_buffer::WRITER
+        .lock()
+        .set_color(Color::Yellow, Color::Black);
+    boot_log!("[ task ] spawning two async tasks on the cooperative executor");
+    {
+        use task::{executor::Executor, Task};
+        let mut executor = Executor::new();
+        executor.spawn(Task::new(count_task("A", 3)));
+        executor.spawn(Task::new(count_task("B", 3)));
+        executor.run(); // runs until both tasks finish; note how A and B interleave
+    }
+    boot_log!("[ task ] both tasks finished - executor drained");
+    boot_log!("");
+
+    vga_buffer::WRITER
+        .lock()
+        .set_color(Color::LightGreen, Color::Black);
+    boot_log!("Stage 6 live. Cooperative multitasking works. Idling with hlt.");
     boot_log!("");
 
     // Idle in a halt loop: `hlt` stops the core until the NEXT interrupt
     // arrives, so we sleep between timer ticks instead of burning 100% CPU.
     loop {
         x86_64::instructions::hlt();
+    }
+}
+
+/// A demo async task: print `n` steps, yielding the CPU after each one so the
+/// executor can let other tasks run in between. Two of these spawned together
+/// will interleave (A1, B1, A2, B2, ...), which is the whole point.
+async fn count_task(name: &'static str, n: u32) {
+    for i in 1..=n {
+        boot_log!("[ task ] task {} : step {}/{}", name, i, n);
+        task::yield_now().await;
     }
 }
 

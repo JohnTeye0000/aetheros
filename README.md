@@ -18,37 +18,38 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **PS/2 keyboard input** — IRQ1 is unmasked and handled; raw scancodes are read from port `0x60` and decoded (via `pc-keyboard`) into characters, which the kernel echoes to the screen. The first time the kernel reacts to *you*.
 - [x] **Paging / virtual memory** — the kernel reads the active page tables (translating any virtual address to its physical frame via the recursive offset map) and **writes its own mappings**: it maps a fresh, unused virtual page onto the VGA frame and prints through it. Plus a bootloader-memory-map frame allocator. The foundation for a heap and, later, separate address spaces.
 - [x] **Kernel heap** — a 100 KiB heap region is mapped and managed by a **bump allocator written from scratch** (no external crate), registered as Rust's `#[global_allocator]`. `Box`, `Vec`, and `String` now work inside the kernel.
+- [x] **Cooperative multitasking** — an async/await `Task` type and a small round-robin executor (with a hand-built `Waker`). Two async tasks that `yield_now().await` after each step interleave on a single CPU — concurrency without threads or preemption.
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
-Booted in QEMU. The black-on-white **"New!"** (left) was written through a
-brand-new virtual page the kernel mapped onto the VGA frame itself; the `[ mem ]`
-lines show virtual→physical translations; the `[ heap ]` lines show `Box`/`Vec`/
-`String` working on a heap our own allocator manages:
+Booted in QEMU. The `[ heap ]` lines show `Box`/`Vec`/`String` working on a heap
+our own allocator manages; the `[ task ]` lines show two async tasks (A and B)
+**interleaving** on a single CPU — cooperative multitasking:
 
-![AetherOS kernel: paging, self-mapped screen write, and a working heap](docs/boot-stage5.png)
+![AetherOS kernel: heap allocation and two async tasks interleaving](docs/boot-stage6.png)
 
 …and the key lines from the serial log:
 
 ```
-[ mem  ] taking ownership of the page tables
-[ mem  ] vga buffer  0x0000000b8000 -> Some(PhysAddr(0xb8000))
-[ mem  ] phys offset 0x018000000000 -> Some(PhysAddr(0x0))
-[ mem  ] stack var   0x010000201cb0 -> Some(PhysAddr(0x279cb0))
-[ mem  ] mapping a fresh page -> VGA frame, writing through it
-[ mem  ] 'New!' now on screen via page 0xdeadbeef000
-
-[ heap ] mapping a 100 KiB heap and arming the allocator
 [ heap ] Box<u64> at 0x444444440000 holds 42
 [ heap ] Vec of 100 numbers, sum(1..=100) = 5050
 [ heap ] String: "a heap-allocated string" (23 bytes)
 
-Stage 5 live. Heap online - Box/Vec/String work. Idling with hlt.
+[ task ] spawning two async tasks on the cooperative executor
+[ task ] task A : step 1/3
+[ task ] task B : step 1/3
+[ task ] task A : step 2/3
+[ task ] task B : step 2/3
+[ task ] task A : step 3/3
+[ task ] task B : step 3/3
+[ task ] both tasks finished - executor drained
+
+Stage 6 live. Cooperative multitasking works. Idling with hlt.
 ```
 
-(Earlier stages — exceptions, the timer, and typing "aetheros" into the kernel
-live — are in `docs/boot-stage0..4.png`.)
+(Earlier stages — exceptions, the timer, paging, and typing "aetheros" into the
+kernel live — are in `docs/boot-stage0..5.png`.)
 
 ## The build arc (the roadmap)
 
@@ -59,7 +60,7 @@ Each item is a real, independently-committable capability — built in order, ro
 - [x] PS/2 keyboard input
 - [x] Physical memory: paging, a frame allocator
 - [x] A kernel heap + allocator (`alloc` support: `Box`, `Vec`)
-- [ ] Cooperative, then preemptive, multitasking
+- [x] Cooperative multitasking (async/await executor) · [ ] preemptive next
 - [ ] A tiny in-kernel shell
 - [ ] A simple ramdisk / read-only filesystem
 
@@ -91,6 +92,7 @@ src/serial.rs      UART 16550 serial driver (host-side logging)
 src/interrupts.rs  IDT, CPU exceptions, PIC, timer + keyboard handlers
 src/memory.rs      paging: page-table access, translation, frame allocator
 src/allocator.rs   kernel heap region + hand-written bump allocator
+src/task/          async Task type + cooperative round-robin executor
 .cargo/config.toml build-std + target + bootimage runner config
 docs/              boot screenshots + devlog/ (plain-English notes per milestone)
 ```
