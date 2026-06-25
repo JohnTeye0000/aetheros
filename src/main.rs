@@ -21,6 +21,7 @@ mod allocator;
 mod interrupts;
 mod memory;
 mod serial;
+mod shell;
 mod task;
 mod vga_buffer;
 use vga_buffer::Color;
@@ -189,11 +190,27 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     vga_buffer::WRITER
         .lock()
         .set_color(Color::LightGreen, Color::Black);
-    boot_log!("Stage 6 live. Cooperative multitasking works. Idling with hlt.");
+    boot_log!("Stage 6 live. Cooperative multitasking works.");
     boot_log!("");
 
-    // Idle in a halt loop: `hlt` stops the core until the NEXT interrupt
-    // arrives, so we sleep between timer ticks instead of burning 100% CPU.
+    // --- Stage 7: an interactive shell ----------------------------------
+    // Hand the keyboard over to a command shell. From here the kernel is
+    // event-driven: it sleeps in `hlt` and wakes on each keystroke, which the
+    // keyboard interrupt feeds into `shell::on_char`. Type a command, press
+    // Enter, and the kernel runs it.
+    vga_buffer::WRITER
+        .lock()
+        .set_color(Color::LightCyan, Color::Black);
+    boot_log!("Stage 7 live. Interactive shell ready.");
+    boot_log!("");
+    vga_buffer::WRITER
+        .lock()
+        .set_color(Color::White, Color::Black);
+    shell::start();
+
+    // Idle in a halt loop: `hlt` stops the core until the next interrupt
+    // (a keystroke or timer tick), so we sleep instead of burning 100% CPU.
+    // The shell itself runs from inside the keyboard interrupt handler.
     loop {
         x86_64::instructions::hlt();
     }

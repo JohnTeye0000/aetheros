@@ -114,6 +114,11 @@ pub fn init_hardware() {
     x86_64::instructions::interrupts::enable();
 }
 
+/// How many timer ticks have elapsed since boot (a rough uptime: ~18.2/sec).
+pub fn ticks() -> u64 {
+    TICKS.load(Ordering::SeqCst)
+}
+
 /// Timer interrupt (IRQ0 → vector 32). Fired by the PIT roughly 18.2 times per
 /// second. We print the first few ticks as proof the hardware is driving us,
 /// then go quiet so we don't flood the log.
@@ -154,14 +159,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     // (plus modifier state) to an actual character.
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
         if let Some(key) = keyboard.process_keyevent(key_event) {
-            match key {
-                DecodedKey::Unicode(character) => {
-                    crate::print!("{}", character); // echo inline on screen
-                    crate::serial_println!("[ kbd  ] key pressed -> '{}'", character);
-                }
-                DecodedKey::RawKey(key) => {
-                    crate::serial_println!("[ kbd  ] special key -> {:?}", key);
-                }
+            // Feed printable keys to the shell; ignore raw/special keys for now.
+            if let DecodedKey::Unicode(character) = key {
+                crate::shell::on_char(character);
             }
         }
     }

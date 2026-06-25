@@ -123,6 +123,14 @@ impl Writer {
     pub fn set_color(&mut self, foreground: Color, background: Color) {
         self.color_code = ColorCode::new(foreground, background);
     }
+
+    /// Blank every row and move the cursor back to the top-left.
+    pub fn clear(&mut self) {
+        for row in 0..BUFFER_HEIGHT {
+            self.clear_row(row);
+        }
+        self.column_position = 0;
+    }
 }
 
 impl fmt::Write for Writer {
@@ -151,6 +159,14 @@ macro_rules! print {
 macro_rules! println {
     () => ($crate::print!("\n"));
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
+}
+
+/// Clear the whole screen (interrupt-safe).
+pub fn clear() {
+    use x86_64::instructions::interrupts;
+    interrupts::without_interrupts(|| {
+        WRITER.lock().clear();
+    });
 }
 
 #[doc(hidden)]
