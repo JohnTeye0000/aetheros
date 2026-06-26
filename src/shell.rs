@@ -119,7 +119,7 @@ fn dispatch(input: &str) {
 
     match cmd {
         "" => {} // empty line — do nothing
-        "help" => out("commands: help, echo <text>, about, ticks, clear"),
+        "help" => out("commands: help, echo <text>, about, ticks, clear, ls, cat <file>"),
         "echo" => out(args),
         "about" => out("AetherOS - a from-scratch x86-64 kernel in Rust."),
         "ticks" => {
@@ -128,6 +128,30 @@ fn dispatch(input: &str) {
             crate::serial_println!("uptime: {} timer ticks", t);
         }
         "clear" => crate::vga_buffer::clear(),
+        "ls" => {
+            // size + name for each file in the ramdisk
+            for f in crate::fs::files() {
+                crate::println!("{:>5}  {}", f.contents.len(), f.name);
+                crate::serial_println!("{:>5}  {}", f.contents.len(), f.name);
+            }
+        }
+        "cat" => {
+            if args.is_empty() {
+                out("usage: cat <file>");
+            } else {
+                match crate::fs::read(args) {
+                    // contents already end in a newline, so use print (not println)
+                    Some(contents) => {
+                        crate::print!("{}", contents);
+                        crate::serial_print!("{}", contents);
+                    }
+                    None => {
+                        crate::println!("cat: {}: no such file", args);
+                        crate::serial_println!("cat: {}: no such file", args);
+                    }
+                }
+            }
+        }
         other => {
             crate::println!("unknown command: '{}' (try 'help')", other);
             crate::serial_println!("unknown command: '{}'", other);

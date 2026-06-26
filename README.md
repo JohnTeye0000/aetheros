@@ -19,28 +19,28 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Paging / virtual memory** — the kernel reads the active page tables (translating any virtual address to its physical frame via the recursive offset map) and **writes its own mappings**: it maps a fresh, unused virtual page onto the VGA frame and prints through it. Plus a bootloader-memory-map frame allocator. The foundation for a heap and, later, separate address spaces.
 - [x] **Kernel heap** — a 100 KiB heap region is mapped and managed by a **bump allocator written from scratch** (no external crate), registered as Rust's `#[global_allocator]`. `Box`, `Vec`, and `String` now work inside the kernel.
 - [x] **Cooperative multitasking** — an async/await `Task` type and a small round-robin executor (with a hand-built `Waker`). Two async tasks that `yield_now().await` after each step interleave on a single CPU — concurrency without threads or preemption.
-- [x] **Interactive shell** — type a command, press Enter, the kernel runs it. The keyboard interrupt feeds a line buffer; built-in commands so far: `help`, `echo`, `about`, `ticks` (live uptime), `clear`. **You can drive the OS.**
+- [x] **Interactive shell** — type a command, press Enter, the kernel runs it. The keyboard interrupt feeds a line buffer; built-in commands: `help`, `echo`, `about`, `ticks` (live uptime), `clear`, `ls`, `cat`. **You can drive the OS.**
+- [x] **Read-only filesystem (ramdisk)** — a set of named files baked into the kernel image, behind a lookup-by-name interface. `ls` lists them (with sizes), `cat <file>` prints contents. The abstraction a real disk-backed store would later slot behind.
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
-Booted in QEMU, then driven interactively — typing commands into the kernel's
-own shell and getting responses (`help`, `about`, `ticks`):
+Booted in QEMU, then driven interactively — listing and reading files in the
+kernel's own shell:
 
-![AetherOS interactive shell responding to typed commands](docs/boot-stage7.png)
+![AetherOS shell: ls and cat on the ramdisk filesystem](docs/boot-stage8.png)
 
 The same session over the serial port:
 
 ```
-Stage 7 live. Interactive shell ready.
-
 AetherOS shell. Type 'help' for commands.
-aether> help
-commands: help, echo <text>, about, ticks, clear
-aether> about
-AetherOS - a from-scratch x86-64 kernel in Rust.
-aether> ticks
-uptime: 225 timer ticks (~12 s)
+aether> ls
+   90  motd
+  103  readme.txt
+  121  stages.txt
+aether> cat motd
+Welcome to AetherOS.
+An x86-64 operating system built from scratch, one commit at a time.
 aether>
 ```
 
@@ -59,8 +59,8 @@ Each item is a real, independently-committable capability — built in order, ro
 - [x] A kernel heap + allocator (`alloc` support: `Box`, `Vec`)
 - [x] Cooperative multitasking (async/await executor) · [ ] preemptive next
 - [x] A tiny in-kernel shell
-- [ ] A simple ramdisk / read-only filesystem
-- [ ] More shell commands; preemptive scheduling
+- [x] A simple ramdisk / read-only filesystem (`ls`, `cat`)
+- [ ] Preemptive scheduling; a real disk-backed filesystem; more commands
 
 ## How it boots
 
@@ -92,6 +92,7 @@ src/memory.rs      paging: page-table access, translation, frame allocator
 src/allocator.rs   kernel heap region + hand-written bump allocator
 src/task/          async Task type + cooperative round-robin executor
 src/shell.rs       interactive command shell (line buffer + commands)
+src/fs.rs          read-only in-memory filesystem (ramdisk)
 .cargo/config.toml build-std + target + bootimage runner config
 docs/              boot screenshots + devlog/ (plain-English notes per milestone)
 ```
