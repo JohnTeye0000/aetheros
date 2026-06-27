@@ -1,44 +1,90 @@
-//! A tiny read-only in-memory filesystem (a "ramdisk").
+//! A tiny in-memory filesystem (a "ramdisk") — now read-write.
 //!
-//! A real OS reads files off a disk or an "initrd" (initial RAM disk) the
-//! bootloader hands it. We don't have a disk driver yet, so our filesystem is
-//! the simplest thing that still teaches the idea: a fixed set of named files
-//! whose contents are **compiled into the kernel image** as static data.
+//! A real OS reads files off a disk or an "initrd" the bootloader hands it. We
+//! still don't have a disk driver, so our files live entirely in RAM — but now
+//! they live on the **heap** (Stage 5), in a growable `Vec` of `File`s with
+//! owned `String` contents. That means files can be created, overwritten, and
+//! deleted at runtime, not just read.
 //!
-//! What matters is the *abstraction* it introduces: code (and the shell's `ls`
-//! / `cat`) now asks for a file *by name* and gets bytes back, without caring
-//! where those bytes physically live. Swapping this static table for a real
-//! disk-backed store later is then just an implementation detail behind the
-//! same interface.
+//! The trade-off is honest: because there's no real storage device, everything
+//! here is lost on reboot. Persisting across reboots needs a disk driver, which
+//! is a later milestone. What this proves is the read-write *interface* — and
+//! that the kernel's own heap is solid enough to back it.
 
-/// One file: a name and its contents.
+use alloc::string::String;
+use alloc::vec::Vec;
+use lazy_static::lazy_static;
+use spin::Mutex;
+
+/// One file: an owned name and owned contents (both on the heap).
 pub struct File {
-    pub name: &'static str,
-    pub contents: &'static str,
+    pub name: String,
+    pub contents: String,
 }
 
-/// The whole "disk" — baked into the kernel binary. Read-only by construction.
-static FILES: &[File] = &[
-    File {
-        name: "motd",
-        contents: "Welcome to AetherOS.\nAn x86-64 operating system built from scratch, one commit at a time.\n",
-    },
-    File {
-        name: "readme.txt",
-        contents: "AetherOS is a from-scratch kernel written in Rust.\nType 'help' for shell commands; 'ls' to list files.\n",
-    },
-    File {
-        name: "stages.txt",
-        contents: "boot -> exceptions -> timer -> keyboard -> paging -> heap -> tasks -> shell -> fs\nEvery layer above was written by hand.\n",
-    },
-];
-
-/// Iterate over every file in the ramdisk.
-pub fn files() -> impl Iterator<Item = &'static File> {
-    FILES.iter()
+lazy_static! {
+    /// The whole "disk", behind a spinlock. Seeded with a few starter files.
+    static ref FILES: Mutex<Vec<File>> = Mutex::new(seed());
 }
 
-/// Look up a file's contents by name. Returns `None` if there's no such file.
-pub fn read(name: &str) -> Option<&'static str> {
-    FILES.iter().find(|f| f.name == name).map(|f| f.contents)
+/// The files the ramdisk starts with at boot.
+fn seed() -> Vec<File> {
+    let mut files = Vec::new();
+    push(&mut files, "motd",
+        "Welcome to AetherOS.\nAn x86-64 operating system built from scratch, one commit at a time.\n");
+    push(&mut files, "readme.txt",
+        "AetherOS is a from-scratch kernel written in Rust.\nTry: write notes hello world | ls | cat notes | rm notes\n");
+    push(&mut files, "stages.txt",
+        "boot -> exceptions -> timer -> keyboard -> paging -> heap -> tasks -> shell -> fs\nEvery layer above was written by hand.\n");
+    files
+}
+
+fn push(files: &mut Vec<File>, name: &str, contents: &str) {
+    files.push(File {
+        name: String::from(name),
+        contents: String::from(contents),
+    });
+}
+
+/// List every file as `(name, size_in_bytes)`. Returns owned copies so callers
+/// don't have to hold the filesystem lock while they print.
+pub fn list() -> Vec<(String, usize)> {
+    FILES
+        .lock()
+        .iter()
+        .map(|f| (f.name.clone(), f.contents.len()))
+        .collect()
+}
+
+/// Read a file's contents by name (a copy), or `None` if it doesn't exist.
+pub fn read(name: &str) -> Option<String> {
+    FILES
+        .lock()
+        .iter()
+        .find(|f| f.name == name)
+        .map(|f| f.contents.clone())
+}
+
+/// Create a file, or overwrite it if the name already exists.
+pub fn write(name: &str, contents: &str) {
+    let mut files = FILES.lock();
+    if let Some(file) = files.iter_mut().find(|f| f.name == name) {
+        file.contents = String::from(contents);
+    } else {
+        files.push(File {
+            name: String::from(name),
+            contents: String::from(contents),
+        });
+    }
+}
+
+/// Delete a file. Returns `true` if it existed.
+pub fn remove(name: &str) -> bool {
+    let mut files = FILES.lock();
+    if let Some(pos) = files.iter().position(|f| f.name == name) {
+        files.remove(pos);
+        true
+    } else {
+        false
+    }
 }

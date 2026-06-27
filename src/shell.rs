@@ -119,7 +119,7 @@ fn dispatch(input: &str) {
 
     match cmd {
         "" => {} // empty line — do nothing
-        "help" => out("commands: help, echo <text>, about, ticks, clear, ls, cat <file>"),
+        "help" => out("commands: help, echo, about, ticks, clear, ls, cat <f>, write <f> <text>, rm <f>"),
         "echo" => out(args),
         "about" => out("AetherOS - a from-scratch x86-64 kernel in Rust."),
         "ticks" => {
@@ -130,9 +130,9 @@ fn dispatch(input: &str) {
         "clear" => crate::vga_buffer::clear(),
         "ls" => {
             // size + name for each file in the ramdisk
-            for f in crate::fs::files() {
-                crate::println!("{:>5}  {}", f.contents.len(), f.name);
-                crate::serial_println!("{:>5}  {}", f.contents.len(), f.name);
+            for (name, size) in crate::fs::list() {
+                crate::println!("{:>5}  {}", size, name);
+                crate::serial_println!("{:>5}  {}", size, name);
             }
         }
         "cat" => {
@@ -140,16 +140,45 @@ fn dispatch(input: &str) {
                 out("usage: cat <file>");
             } else {
                 match crate::fs::read(args) {
-                    // contents already end in a newline, so use print (not println)
                     Some(contents) => {
                         crate::print!("{}", contents);
                         crate::serial_print!("{}", contents);
+                        // make sure the next prompt starts on a fresh line
+                        if !contents.ends_with('\n') {
+                            crate::println!();
+                            crate::serial_println!();
+                        }
                     }
                     None => {
                         crate::println!("cat: {}: no such file", args);
                         crate::serial_println!("cat: {}: no such file", args);
                     }
                 }
+            }
+        }
+        "write" => match args.split_once(' ') {
+            // write <file> <text> — create or overwrite a file
+            Some((name, text)) => {
+                crate::fs::write(name, text);
+                crate::println!("wrote {} ({} bytes)", name, text.len());
+                crate::serial_println!("wrote {} ({} bytes)", name, text.len());
+            }
+            None if !args.is_empty() => {
+                crate::fs::write(args, "");
+                crate::println!("wrote {} (empty)", args);
+                crate::serial_println!("wrote {} (empty)", args);
+            }
+            None => out("usage: write <file> <text>"),
+        },
+        "rm" => {
+            if args.is_empty() {
+                out("usage: rm <file>");
+            } else if crate::fs::remove(args) {
+                crate::println!("removed {}", args);
+                crate::serial_println!("removed {}", args);
+            } else {
+                crate::println!("rm: {}: no such file", args);
+                crate::serial_println!("rm: {}: no such file", args);
             }
         }
         other => {
