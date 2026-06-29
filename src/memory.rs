@@ -12,6 +12,8 @@
 //!      whenever creating a mapping might require a fresh page table).
 //!   3. `create_example_mapping` — a demo that maps a new page to the VGA buffer.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
 use x86_64::{
     structures::paging::{
@@ -105,4 +107,24 @@ pub fn create_example_mapping(
     // memory. Here we intentionally alias the VGA frame, for the demo only.
     let map_to_result = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
     map_to_result.expect("map_to failed").flush(); // flush() updates the TLB
+}
+
+/// Total usable physical RAM in bytes, recorded once at boot. The boot info is
+/// only available in `kernel_main`, so we sum the usable regions there and stash
+/// the result here for the rest of the kernel (e.g. the shell's `mem` command).
+static USABLE_RAM: AtomicU64 = AtomicU64::new(0);
+
+/// Sum every region the bootloader marked `Usable` and remember the total.
+pub fn record_usable_ram(memory_map: &MemoryMap) {
+    let total: u64 = memory_map
+        .iter()
+        .filter(|r| r.region_type == MemoryRegionType::Usable)
+        .map(|r| r.range.end_addr() - r.range.start_addr())
+        .sum();
+    USABLE_RAM.store(total, Ordering::Relaxed);
+}
+
+/// Total usable physical RAM in bytes (0 before `record_usable_ram` runs).
+pub fn usable_ram() -> u64 {
+    USABLE_RAM.load(Ordering::Relaxed)
 }

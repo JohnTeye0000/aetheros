@@ -103,6 +103,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
     let mut frame_allocator =
         unsafe { memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    // Tally total usable RAM now, while we still have the boot info (the shell's
+    // `mem` command reads it back later).
+    memory::record_usable_ram(&boot_info.memory_map);
 
     // Translate a few virtual addresses to their physical frames — proof we can
     // read the tables. (VGA is identity-mapped; the offset maps to physical 0;

@@ -119,13 +119,26 @@ fn dispatch(input: &str) {
 
     match cmd {
         "" => {} // empty line — do nothing
-        "help" => out("commands: help, echo, about, ticks, clear, ls, cat <f>, write <f> <text>, rm <f>"),
+        "help" => out("commands: help, echo, about, ticks, mem, clear, ls, cat <f>, write <f> <text>, rm <f>"),
         "echo" => out(args),
         "about" => out("AetherOS - a from-scratch x86-64 kernel in Rust."),
         "ticks" => {
             let t = crate::interrupts::ticks();
             crate::println!("uptime: {} timer ticks (~{} s)", t, t / 18);
             crate::serial_println!("uptime: {} timer ticks", t);
+        }
+        "mem" => {
+            let (used, total, allocs) = crate::allocator::heap_stats();
+            let ram = crate::memory::usable_ram();
+            crate::println!(
+                "heap: {} / {} bytes in use ({} live allocations)",
+                used, total, allocs
+            );
+            crate::println!("RAM:  {} bytes usable (~{} MiB)", ram, ram / (1024 * 1024));
+            crate::serial_println!(
+                "heap {}/{} bytes, {} allocs; RAM {} bytes",
+                used, total, allocs, ram
+            );
         }
         "clear" => crate::vga_buffer::clear(),
         "ls" => {

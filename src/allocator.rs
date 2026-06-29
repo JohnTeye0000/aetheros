@@ -162,3 +162,16 @@ impl<A> Locked<A> {
 fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
+
+/// Report heap usage: `(bytes_in_use, total_bytes, live_allocations)`.
+///
+/// "In use" is the bump pointer's distance from the heap start — its
+/// high-water mark. Remember a bump allocator only reclaims space once *every*
+/// allocation has been freed (it then resets `next` to the start), so this is
+/// the honest picture of how a bump allocator actually behaves.
+pub fn heap_stats() -> (usize, usize, usize) {
+    let bump = ALLOCATOR.lock();
+    let used = bump.next.saturating_sub(bump.heap_start);
+    let total = bump.heap_end.saturating_sub(bump.heap_start);
+    (used, total, bump.allocations)
+}

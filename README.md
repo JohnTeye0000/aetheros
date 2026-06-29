@@ -19,30 +19,36 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Paging / virtual memory** — the kernel reads the active page tables (translating any virtual address to its physical frame via the recursive offset map) and **writes its own mappings**: it maps a fresh, unused virtual page onto the VGA frame and prints through it. Plus a bootloader-memory-map frame allocator. The foundation for a heap and, later, separate address spaces.
 - [x] **Kernel heap** — a 100 KiB heap region is mapped and managed by a **bump allocator written from scratch** (no external crate), registered as Rust's `#[global_allocator]`. `Box`, `Vec`, and `String` now work inside the kernel.
 - [x] **Cooperative multitasking** — an async/await `Task` type and a small round-robin executor (with a hand-built `Waker`). Two async tasks that `yield_now().await` after each step interleave on a single CPU — concurrency without threads or preemption.
-- [x] **Interactive shell** — type a command, press Enter, the kernel runs it. The keyboard interrupt feeds a line buffer; built-in commands: `help`, `echo`, `about`, `ticks` (live uptime), `clear`, `ls`, `cat`, `write`, `rm`. **You can drive the OS.**
+- [x] **Interactive shell** — type a command, press Enter, the kernel runs it. The keyboard interrupt feeds a line buffer; built-in commands: `help`, `echo`, `about`, `ticks` (live uptime), `mem` (heap + RAM stats), `clear`, `ls`, `cat`, `write`, `rm`. **You can drive the OS.**
 - [x] **Read-write in-memory filesystem (ramdisk)** — files live on the kernel heap (a `Vec<File>` with owned `String`s), so they can be **created, read, and deleted at runtime**: `ls`, `cat <file>`, `write <file> <text>`, `rm <file>`. (In-memory only — lost on reboot until there's a disk driver.)
+- [x] **Memory introspection** — the allocator tracks live usage and the boot memory map is tallied for total RAM; `mem` reports heap bytes-in-use + allocation count and total usable RAM (like a tiny `free`).
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
-Booted in QEMU, then driven interactively — **creating a file and reading it
-back** in the kernel's own shell, on a heap-backed filesystem:
+Booted in QEMU, then driven interactively. Here `ls` lists the filesystem and
+`mem` reports the kernel's own resource usage — the filesystem's data is visibly
+living on the heap (7 allocations), and total RAM comes from the boot memory map:
 
-![AetherOS shell: write a file, then cat it back](docs/boot-stage9.png)
+![AetherOS shell: ls and mem (heap + RAM stats)](docs/boot-stage10.png)
 
-A full create → read → delete cycle over the serial port:
+Some sessions over the serial port:
 
 ```
+aether> ls
+   90  motd
+  108  readme.txt
+  121  stages.txt
+aether> mem
+heap: 664 / 102400 bytes in use (7 live allocations)
+RAM:  126713856 bytes usable (~120 MiB)
+
 aether> write a hi
 wrote a (2 bytes)
 aether> cat a
 hi
-aether> rm motd
-removed motd
-aether> ls
-  108  readme.txt
-  121  stages.txt
-aether>
+aether> rm a
+removed a
 ```
 
 (Every earlier stage prints its own proof too — exceptions, the timer, paging
@@ -61,6 +67,7 @@ Each item is a real, independently-committable capability — built in order, ro
 - [x] Cooperative multitasking (async/await executor) · [ ] preemptive next
 - [x] A tiny in-kernel shell
 - [x] A ramdisk filesystem — now read-write (`ls`, `cat`, `write`, `rm`)
+- [x] Memory introspection (`mem`: heap + RAM stats)
 - [ ] Preemptive scheduling; a real disk-backed filesystem
 
 ## How it boots
