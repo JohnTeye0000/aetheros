@@ -9,9 +9,12 @@
 //! written from inside the keyboard *interrupt handler*, and a fixed array means
 //! no allocation can happen at interrupt time (simpler and safer).
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 const MAX_LINE: usize = 128;
+const HISTORY_MAX: usize = 32;
 const PROMPT: &str = "aether> ";
 
 /// The current input line being typed.
@@ -47,6 +50,11 @@ impl Line {
 }
 
 static LINE: Mutex<Line> = Mutex::new(Line::new());
+
+/// The last few commands the user entered (most recent last). Heap-backed, so
+/// it grows as needed; the `history` command lists it. `Vec::new()` is a const
+/// fn, so this needs no lazy initialisation.
+static HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Print the prompt (to screen and serial).
 pub fn prompt() {
@@ -107,6 +115,17 @@ fn run() {
     };
 
     let input = core::str::from_utf8(&local[..n]).unwrap_or("").trim();
+
+    // Remember non-empty commands so `history` can list them. Keep only the
+    // most recent HISTORY_MAX so it can't grow without bound.
+    if !input.is_empty() {
+        let mut hist = HISTORY.lock();
+        hist.push(String::from(input));
+        if hist.len() > HISTORY_MAX {
+            hist.remove(0);
+        }
+    }
+
     dispatch(input);
 }
 
@@ -119,7 +138,11 @@ fn dispatch(input: &str) {
 
     match cmd {
         "" => {} // empty line — do nothing
-        "help" => out("commands: help, echo, about, ticks, mem, clear, ls, cat <f>, write <f> <text>, rm <f>"),
+        "help" => {
+            out("commands:");
+            out("  help  echo  about  ticks  mem  clear  history");
+            out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
+        }
         "echo" => out(args),
         "about" => out("AetherOS - a from-scratch x86-64 kernel in Rust."),
         "ticks" => {
@@ -192,6 +215,43 @@ fn dispatch(input: &str) {
             } else {
                 crate::println!("rm: {}: no such file", args);
                 crate::serial_println!("rm: {}: no such file", args);
+            }
+        }
+        "cp" => match args.split_once(' ') {
+            // cp <src> <dst> — copy a file's contents to a new name
+            Some((src, dst)) => match crate::fs::read(src) {
+                Some(contents) => {
+                    crate::fs::write(dst, &contents);
+                    crate::println!("copied {} -> {}", src, dst);
+                    crate::serial_println!("copied {} -> {}", src, dst);
+                }
+                None => {
+                    crate::println!("cp: {}: no such file", src);
+                    crate::serial_println!("cp: {}: no such file", src);
+                }
+            },
+            None => out("usage: cp <src> <dst>"),
+        },
+        "mv" => match args.split_once(' ') {
+            // mv <src> <dst> — copy then delete the original (a rename)
+            Some((src, dst)) => match crate::fs::read(src) {
+                Some(contents) => {
+                    crate::fs::write(dst, &contents);
+                    crate::fs::remove(src);
+                    crate::println!("moved {} -> {}", src, dst);
+                    crate::serial_println!("moved {} -> {}", src, dst);
+                }
+                None => {
+                    crate::println!("mv: {}: no such file", src);
+                    crate::serial_println!("mv: {}: no such file", src);
+                }
+            },
+            None => out("usage: mv <src> <dst>"),
+        },
+        "history" => {
+            for (i, cmd) in HISTORY.lock().iter().enumerate() {
+                crate::println!("{:>3}  {}", i + 1, cmd);
+                crate::serial_println!("{:>3}  {}", i + 1, cmd);
             }
         }
         other => {
