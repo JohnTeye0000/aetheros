@@ -22,16 +22,19 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Interactive shell** — type a command, press Enter, the kernel runs it. The keyboard interrupt feeds a line buffer; commands: `help`, `echo`, `about`, `ticks`, `mem`, `clear`, `history`, and a file set `ls`, `cat`, `write`, `rm`, `cp`, `mv`. **You can drive the OS.**
 - [x] **Read-write in-memory filesystem (ramdisk)** — files live on the kernel heap (a `Vec<File>` with owned `String`s), so they can be **created, read, and deleted at runtime**: `ls`, `cat <file>`, `write <file> <text>`, `rm <file>`. (In-memory only — lost on reboot until there's a disk driver.)
 - [x] **Memory introspection** — the allocator tracks live usage and the boot memory map is tallied for total RAM; `mem` reports heap bytes-in-use + allocation count and total usable RAM (like a tiny `free`).
+- [x] **Stack-overflow hardening (GDT + TSS + IST)** — a Global Descriptor Table and Task State Segment give the double-fault handler its own **Interrupt Stack Table** stack, so a kernel stack overflow is *caught and reported* instead of escalating to a triple-fault reboot. The `crash` command proves it.
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
-Booted in QEMU, then driven interactively — copying a file, listing it, and
-recalling command history, all in the kernel's own shell:
+Running `crash` deliberately overflows the kernel stack — and instead of the
+machine rebooting (a triple fault), the double-fault handler catches it on its
+dedicated IST stack and reports it. The handler *running at all* is the proof
+the stack switch worked:
 
-![AetherOS shell: cp, ls, and command history](docs/boot-stage11.png)
+![AetherOS: the double-fault handler catching a deliberate stack overflow](docs/boot-stage12.png)
 
-Some sessions over the serial port:
+Everyday driving of the shell, over the serial port:
 
 ```
 aether> cp motd x
@@ -42,7 +45,6 @@ aether> history
   1  cp motd x
   2  mv x y
   3  history
-
 aether> mem
 heap: 664 / 102400 bytes in use (7 live allocations)
 RAM:  126713856 bytes usable (~120 MiB)
@@ -66,6 +68,7 @@ Each item is a real, independently-committable capability — built in order, ro
 - [x] A ramdisk filesystem — now read-write (`ls`, `cat`, `write`, `rm`)
 - [x] Memory introspection (`mem`: heap + RAM stats)
 - [x] Richer shell: command `history`, file `cp`/`mv`
+- [x] Stack-overflow hardening (GDT + TSS + double-fault IST stack)
 - [ ] Preemptive scheduling; a real disk-backed filesystem
 
 ## How it boots
@@ -93,6 +96,7 @@ cargo run
 src/main.rs        kernel entry point (_start) + panic handler
 src/vga_buffer.rs  VGA text-mode driver and print macros
 src/serial.rs      UART 16550 serial driver (host-side logging)
+src/gdt.rs         GDT + TSS with a double-fault IST stack
 src/interrupts.rs  IDT, CPU exceptions, PIC, timer + keyboard handlers
 src/memory.rs      paging: page-table access, translation, frame allocator
 src/allocator.rs   kernel heap region + hand-written bump allocator

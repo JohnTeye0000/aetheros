@@ -65,7 +65,13 @@ lazy_static! {
         let mut idt = InterruptDescriptorTable::new();
         // Vector 3: breakpoint. Vector 8: double fault.
         idt.breakpoint.set_handler_fn(breakpoint_handler);
-        idt.double_fault.set_handler_fn(double_fault_handler);
+        // Run the double-fault handler on its own IST stack (see gdt.rs) so a
+        // stack overflow can't escalate it into a triple-fault reboot.
+        unsafe {
+            idt.double_fault
+                .set_handler_fn(double_fault_handler)
+                .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
+        }
         // Vector 32: the timer IRQ (IRQ0), now that the PIC is remapped there.
         idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         // Vector 33: the keyboard IRQ (IRQ1).

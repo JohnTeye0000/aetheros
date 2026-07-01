@@ -140,7 +140,7 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  mem  clear  history");
+            out("  help  echo  about  ticks  mem  clear  history  crash");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
@@ -164,6 +164,11 @@ fn dispatch(input: &str) {
             );
         }
         "clear" => crate::vga_buffer::clear(),
+        "crash" => {
+            out("deliberately overflowing the kernel stack...");
+            out("the double-fault handler should catch it and halt (no reboot).");
+            stack_overflow();
+        }
         "ls" => {
             // size + name for each file in the ramdisk
             for (name, size) in crate::fs::list() {
@@ -265,4 +270,15 @@ fn dispatch(input: &str) {
 fn out(s: &str) {
     crate::println!("{}", s);
     crate::serial_println!("{}", s);
+}
+
+/// Recurse forever to overflow the kernel stack — a deliberate crash that shows
+/// the double-fault handler (running on its own IST stack, see gdt.rs) catching
+/// what would otherwise be a triple-fault reboot. The volatile read after the
+/// recursive call stops the compiler from turning this into a plain loop.
+#[allow(unconditional_recursion)]
+fn stack_overflow() {
+    let x = 0u8;
+    stack_overflow();
+    unsafe { core::ptr::read_volatile(&x) };
 }

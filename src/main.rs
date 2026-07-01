@@ -19,6 +19,7 @@ use bootloader::{entry_point, BootInfo};
 
 mod allocator;
 mod fs;
+mod gdt;
 mod interrupts;
 mod memory;
 mod serial;
@@ -65,6 +66,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         .lock()
         .set_color(Color::Yellow, Color::Black);
     boot_log!("");
+    boot_log!("[ gdt  ] loading GDT + TSS (double-fault stack via IST)");
+    gdt::init();
     boot_log!("[ idt  ] loading the interrupt descriptor table");
     interrupts::init();
     boot_log!("[ idt  ] raising a breakpoint exception (int3) on purpose...");
