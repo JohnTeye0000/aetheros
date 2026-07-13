@@ -17,7 +17,7 @@ use lazy_static::lazy_static;
 use pc_keyboard::{layouts, HandleControl, Keyboard, ScancodeSet1};
 use pic8259::ChainedPics;
 use spin::Mutex;
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 // --- Hardware interrupts (8259 PIC) -------------------------------------
 //
@@ -72,6 +72,10 @@ lazy_static! {
                 .set_handler_fn(double_fault_handler)
                 .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
         }
+        // Vector 14: page faults — report the faulting address instead of
+        // dying silently (an unhandled page fault would escalate to a double
+        // fault).
+        idt.page_fault.set_handler_fn(page_fault_handler);
         // Vector 32: the timer IRQ (IRQ0), now that the PIC is remapped there.
         idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         // Vector 33: the keyboard IRQ (IRQ1).
@@ -212,4 +216,38 @@ extern "x86-interrupt" fn double_fault_handler(
     _error_code: u64,
 ) -> ! {
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
+}
+
+/// Page fault (`#PF`, vector 14) — the CPU couldn't translate a virtual address
+/// (it's unmapped, or the access violated the page's permissions). This is the
+/// single most common memory bug, so a good handler is worth its weight.
+///
+/// Two pieces of information make it debuggable: the faulting address, which the
+/// CPU leaves in the `CR2` register, and an `error_code` describing the access
+/// (was it a read or write? user or kernel? a protection violation or a missing
+/// page?). We report both. We can't fix the fault, so we stop rather than return
+/// (returning would just re-run the faulting instruction and fault again).
+extern "x86-interrupt" fn page_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: PageFaultErrorCode,
+) {
+    use x86_64::registers::control::Cr2;
+
+    crate::vga_buffer::WRITER
+        .lock()
+        .set_color(crate::vga_buffer::Color::White, crate::vga_buffer::Color::Red);
+    crate::println!("*** PAGE FAULT ***");
+    crate::println!("accessed address: {:?}", Cr2::read());
+    crate::println!("error code:       {:?}", error_code);
+    crate::println!("{:#?}", stack_frame);
+    crate::serial_println!(
+        "*** PAGE FAULT at {:?} (error {:?})",
+        Cr2::read(),
+        error_code
+    );
+
+    // Unrecoverable here — park the CPU.
+    loop {
+        x86_64::instructions::hlt();
+    }
 }

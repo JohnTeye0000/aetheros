@@ -23,16 +23,18 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Read-write in-memory filesystem (ramdisk)** — files live on the kernel heap (a `Vec<File>` with owned `String`s), so they can be **created, read, and deleted at runtime**: `ls`, `cat <file>`, `write <file> <text>`, `rm <file>`. (In-memory only — lost on reboot until there's a disk driver.)
 - [x] **Memory introspection** — the allocator tracks live usage and the boot memory map is tallied for total RAM; `mem` reports heap bytes-in-use + allocation count and total usable RAM (like a tiny `free`).
 - [x] **Stack-overflow hardening (GDT + TSS + IST)** — a Global Descriptor Table and Task State Segment give the double-fault handler its own **Interrupt Stack Table** stack, so a kernel stack overflow is *caught and reported* instead of escalating to a triple-fault reboot. The `crash` command proves it.
+- [x] **Page-fault diagnostics** — a page-fault handler that reports the faulting virtual address (from `CR2`) and decodes the error code (read vs write, present vs protection). The `pagefault` command triggers one on an unmapped address to show it.
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
-Running `crash` deliberately overflows the kernel stack — and instead of the
-machine rebooting (a triple fault), the double-fault handler catches it on its
-dedicated IST stack and reports it. The handler *running at all* is the proof
-the stack switch worked:
+Running `pagefault` deliberately writes to an unmapped address — and the
+page-fault handler reports exactly what went wrong: the faulting address
+(`0xdeadbeef`), that it was `CAUSED_BY_WRITE`, and the full CPU state. (Its
+sibling `crash` triggers a stack overflow that the double-fault handler catches
+on its dedicated IST stack instead of rebooting — see `docs/boot-stage12.png`.)
 
-![AetherOS: the double-fault handler catching a deliberate stack overflow](docs/boot-stage12.png)
+![AetherOS: the page-fault handler reporting a bad memory access](docs/boot-stage13.png)
 
 Everyday driving of the shell, over the serial port:
 
@@ -69,6 +71,7 @@ Each item is a real, independently-committable capability — built in order, ro
 - [x] Memory introspection (`mem`: heap + RAM stats)
 - [x] Richer shell: command `history`, file `cp`/`mv`
 - [x] Stack-overflow hardening (GDT + TSS + double-fault IST stack)
+- [x] Page-fault handler (reports faulting address + error code)
 - [ ] Preemptive scheduling; a real disk-backed filesystem
 
 ## How it boots

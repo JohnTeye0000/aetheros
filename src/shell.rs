@@ -140,7 +140,7 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  mem  clear  history  crash");
+            out("  help  echo  about  ticks  mem  clear  history  crash  pagefault");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
@@ -168,6 +168,12 @@ fn dispatch(input: &str) {
             out("deliberately overflowing the kernel stack...");
             out("the double-fault handler should catch it and halt (no reboot).");
             stack_overflow();
+        }
+        "pagefault" => {
+            out("writing to an unmapped address (0xdeadbeef)...");
+            out("the page-fault handler should report it and halt.");
+            let ptr = 0xdead_beef as *mut u8;
+            unsafe { *ptr = 42 };
         }
         "ls" => {
             // size + name for each file in the ramdisk
