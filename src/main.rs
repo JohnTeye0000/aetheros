@@ -22,6 +22,7 @@ mod fs;
 mod gdt;
 mod interrupts;
 mod memory;
+mod rtc;
 mod serial;
 mod shell;
 mod task;

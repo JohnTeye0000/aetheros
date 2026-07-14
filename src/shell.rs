@@ -140,7 +140,7 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  mem  clear  history  crash  pagefault");
+            out("  help  echo  about  ticks  date  mem  clear  history  crash  pagefault");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
@@ -149,6 +149,17 @@ fn dispatch(input: &str) {
             let t = crate::interrupts::ticks();
             crate::println!("uptime: {} timer ticks (~{} s)", t, t / 18);
             crate::serial_println!("uptime: {} timer ticks", t);
+        }
+        "date" => {
+            let t = crate::rtc::now();
+            crate::println!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+                t.year, t.month, t.day, t.hour, t.minute, t.second
+            );
+            crate::serial_println!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+                t.year, t.month, t.day, t.hour, t.minute, t.second
+            );
         }
         "mem" => {
             let (used, total, allocs) = crate::allocator::heap_stats();

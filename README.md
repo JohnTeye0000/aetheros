@@ -19,7 +19,8 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Paging / virtual memory** — the kernel reads the active page tables (translating any virtual address to its physical frame via the recursive offset map) and **writes its own mappings**: it maps a fresh, unused virtual page onto the VGA frame and prints through it. Plus a bootloader-memory-map frame allocator. The foundation for a heap and, later, separate address spaces.
 - [x] **Kernel heap** — a 100 KiB heap region is mapped and managed by a **bump allocator written from scratch** (no external crate), registered as Rust's `#[global_allocator]`. `Box`, `Vec`, and `String` now work inside the kernel.
 - [x] **Cooperative multitasking** — an async/await `Task` type and a small round-robin executor (with a hand-built `Waker`). Two async tasks that `yield_now().await` after each step interleave on a single CPU — concurrency without threads or preemption.
-- [x] **Interactive shell** — type a command, press Enter, the kernel runs it. The keyboard interrupt feeds a line buffer; commands: `help`, `echo`, `about`, `ticks`, `mem`, `clear`, `history`, and a file set `ls`, `cat`, `write`, `rm`, `cp`, `mv`. **You can drive the OS.**
+- [x] **Interactive shell** — type a command, press Enter, the kernel runs it. The keyboard interrupt feeds a line buffer; commands: `help`, `echo`, `about`, `ticks`, `date`, `mem`, `clear`, `history`, fault demos `crash`/`pagefault`, and a file set `ls`, `cat`, `write`, `rm`, `cp`, `mv`. **You can drive the OS.**
+- [x] **Real-time clock** — reads the battery-backed CMOS RTC over I/O ports (decoding BCD and waiting out the "update in progress" flag); `date` prints the live wall-clock time in UTC.
 - [x] **Read-write in-memory filesystem (ramdisk)** — files live on the kernel heap (a `Vec<File>` with owned `String`s), so they can be **created, read, and deleted at runtime**: `ls`, `cat <file>`, `write <file> <text>`, `rm <file>`. (In-memory only — lost on reboot until there's a disk driver.)
 - [x] **Memory introspection** — the allocator tracks live usage and the boot memory map is tallied for total RAM; `mem` reports heap bytes-in-use + allocation count and total usable RAM (like a tiny `free`).
 - [x] **Stack-overflow hardening (GDT + TSS + IST)** — a Global Descriptor Table and Task State Segment give the double-fault handler its own **Interrupt Stack Table** stack, so a kernel stack overflow is *caught and reported* instead of escalating to a triple-fault reboot. The `crash` command proves it.
@@ -28,29 +29,32 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 
 ### Proof it boots
 
-Running `pagefault` deliberately writes to an unmapped address — and the
-page-fault handler reports exactly what went wrong: the faulting address
-(`0xdeadbeef`), that it was `CAUSED_BY_WRITE`, and the full CPU state. (Its
-sibling `crash` triggers a stack overflow that the double-fault handler catches
-on its dedicated IST stack instead of rebooting — see `docs/boot-stage12.png`.)
+Driving the shell interactively — `date` reads the real hardware clock (and
+advances between calls), and `mem` reports the kernel's own memory:
 
-![AetherOS: the page-fault handler reporting a bad memory access](docs/boot-stage13.png)
+![AetherOS shell: the date command reading the real-time clock](docs/boot-stage14.png)
 
-Everyday driving of the shell, over the serial port:
+A tour over the serial port:
 
 ```
-aether> cp motd x
-copied motd -> x
-aether> mv x y
-moved x -> y
-aether> history
-  1  cp motd x
-  2  mv x y
-  3  history
+aether> date
+2026-07-14 12:29:10 UTC
 aether> mem
 heap: 664 / 102400 bytes in use (7 live allocations)
 RAM:  126713856 bytes usable (~120 MiB)
+aether> cp motd x
+copied motd -> x
+aether> history
+  1  date
+  2  mem
+  3  cp motd x
+  4  history
 ```
+
+The fault demos are dramatic too: `crash` overflows the stack (the double-fault
+handler catches it on its IST stack instead of rebooting — `docs/boot-stage12.png`),
+and `pagefault` writes to an unmapped address (the page-fault handler reports the
+address + cause — `docs/boot-stage13.png`).
 
 (Every earlier stage prints its own proof too — exceptions, the timer, paging
 (a self-mapped "New!" on screen), the heap, and two async tasks interleaving.
@@ -72,6 +76,7 @@ Each item is a real, independently-committable capability — built in order, ro
 - [x] Richer shell: command `history`, file `cp`/`mv`
 - [x] Stack-overflow hardening (GDT + TSS + double-fault IST stack)
 - [x] Page-fault handler (reports faulting address + error code)
+- [x] Real-time clock (CMOS RTC → `date`)
 - [ ] Preemptive scheduling; a real disk-backed filesystem
 
 ## How it boots
@@ -102,6 +107,7 @@ src/serial.rs      UART 16550 serial driver (host-side logging)
 src/gdt.rs         GDT + TSS with a double-fault IST stack
 src/interrupts.rs  IDT, CPU exceptions, PIC, timer + keyboard handlers
 src/memory.rs      paging: page-table access, translation, frame allocator
+src/rtc.rs         CMOS real-time-clock reader (the `date` command)
 src/allocator.rs   kernel heap region + hand-written bump allocator
 src/task/          async Task type + cooperative round-robin executor
 src/shell.rs       interactive command shell (line buffer + commands)
