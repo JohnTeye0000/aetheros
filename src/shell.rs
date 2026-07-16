@@ -140,7 +140,7 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  date  mem  clear  history  crash  pagefault");
+            out("  help  echo  about  ticks  date  mem  cpuinfo  clear  history  crash  pagefault");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
@@ -173,6 +173,40 @@ fn dispatch(input: &str) {
                 "heap {}/{} bytes, {} allocs; RAM {} bytes",
                 used, total, allocs, ram
             );
+        }
+        "cpuinfo" => {
+            let info = crate::cpu::identify();
+            let vendor = core::str::from_utf8(&info.vendor).unwrap_or("?");
+            crate::println!("vendor: {}", vendor);
+            crate::serial_println!("vendor: {}", vendor);
+
+            if info.has_brand {
+                // The brand string is padded with trailing NULs; trim them.
+                let raw = core::str::from_utf8(&info.brand).unwrap_or("?");
+                let brand = raw.trim_end_matches('\0').trim();
+                crate::println!("brand:  {}", brand);
+                crate::serial_println!("brand:  {}", brand);
+            }
+
+            crate::println!(
+                "family: {}  model: {}  stepping: {}",
+                info.family, info.model, info.stepping
+            );
+            crate::serial_println!(
+                "family: {}  model: {}  stepping: {}",
+                info.family, info.model, info.stepping
+            );
+
+            crate::print!("features:");
+            crate::serial_print!("features:");
+            for &(is_edx, bit, name) in crate::cpu::FEATURES {
+                if info.has(is_edx, bit) {
+                    crate::print!(" {}", name);
+                    crate::serial_print!(" {}", name);
+                }
+            }
+            crate::println!();
+            crate::serial_println!();
         }
         "clear" => crate::vga_buffer::clear(),
         "crash" => {
