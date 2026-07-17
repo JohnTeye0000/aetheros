@@ -140,7 +140,7 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  date  mem  cpuinfo  clear  history  crash  pagefault");
+            out("  help  echo  about  ticks  date  mem  cpuinfo  lspci  clear  history  crash  pagefault");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
@@ -207,6 +207,27 @@ fn dispatch(input: &str) {
             }
             crate::println!();
             crate::serial_println!();
+        }
+        "lspci" => {
+            let devices = crate::pci::scan();
+            for d in &devices {
+                let class = crate::pci::class_name(d.class);
+                let line = match crate::pci::known_name(d.vendor_id, d.device_id) {
+                    Some(name) => alloc::format!(
+                        "{:02x}:{:02x}.{} {:04x}:{:04x}  {} ({})",
+                        d.bus, d.device, d.function, d.vendor_id, d.device_id, name, class
+                    ),
+                    None => alloc::format!(
+                        "{:02x}:{:02x}.{} {:04x}:{:04x}  ({})",
+                        d.bus, d.device, d.function, d.vendor_id, d.device_id, class
+                    ),
+                };
+                crate::println!("{}", line);
+                crate::serial_println!("{}", line);
+            }
+            let summary = alloc::format!("{} device(s) on bus 0", devices.len());
+            crate::println!("{}", summary);
+            crate::serial_println!("{}", summary);
         }
         "clear" => crate::vga_buffer::clear(),
         "crash" => {
