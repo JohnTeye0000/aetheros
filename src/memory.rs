@@ -35,6 +35,7 @@ use x86_64::{
 /// `physical_memory_offset` (the bootloader's `map_physical_memory` feature
 /// guarantees this) and that no other `Mapper` is alive at the same time.
 pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
+    PHYS_MEM_OFFSET.store(physical_memory_offset.as_u64(), Ordering::Relaxed);
     let level_4_table = active_level_4_table(physical_memory_offset);
     OffsetPageTable::new(level_4_table, physical_memory_offset)
 }
@@ -127,4 +128,17 @@ pub fn record_usable_ram(memory_map: &MemoryMap) {
 /// Total usable physical RAM in bytes (0 before `record_usable_ram` runs).
 pub fn usable_ram() -> u64 {
     USABLE_RAM.load(Ordering::Relaxed)
+}
+
+/// The offset at which the bootloader mapped all of physical memory, stashed
+/// by `init()` so anything later in the kernel (e.g. `acpi`, hunting for a
+/// BIOS table by *physical* address) can translate physical -> virtual without
+/// needing its own copy of the offset threaded through every call site.
+static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+/// Turn a physical address into the virtual address it's readable at, via the
+/// bootloader's identity-plus-offset mapping of all RAM. Valid only after
+/// `init()` has run.
+pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
+    VirtAddr::new(PHYS_MEM_OFFSET.load(Ordering::Relaxed) + phys.as_u64())
 }

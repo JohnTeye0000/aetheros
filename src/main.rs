@@ -17,6 +17,7 @@ use core::panic::PanicInfo;
 
 use bootloader::{entry_point, BootInfo};
 
+mod acpi;
 mod allocator;
 mod cpu;
 mod fs;

@@ -140,7 +140,7 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  date  mem  cpuinfo  lspci  clear  history  crash  pagefault");
+            out("  help  echo  about  ticks  date  mem  cpuinfo  lspci  acpi  clear  history  crash  pagefault");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
@@ -229,6 +229,26 @@ fn dispatch(input: &str) {
             crate::println!("{}", summary);
             crate::serial_println!("{}", summary);
         }
+        "acpi" => match crate::acpi::find_rsdp() {
+            Some(r) => {
+                let oem = core::str::from_utf8(&r.oem_id).unwrap_or("?").trim_end();
+                let version = if r.revision >= 2 { "2.0+ (has XSDT)" } else { "1.0 (RSDT only)" };
+                let line1 = alloc::format!("RSDP found at physical {:#x}", r.physical_address);
+                let line2 = alloc::format!("OEM: {}   ACPI version: {}", oem, version);
+                let line3 = if r.revision >= 2 {
+                    alloc::format!("RSDT: {:#x}   XSDT: {:#x}", r.rsdt_address, r.xsdt_address)
+                } else {
+                    alloc::format!("RSDT: {:#x}", r.rsdt_address)
+                };
+                crate::println!("{}", line1);
+                crate::println!("{}", line2);
+                crate::println!("{}", line3);
+                crate::serial_println!("{}", line1);
+                crate::serial_println!("{}", line2);
+                crate::serial_println!("{}", line3);
+            }
+            None => out("no valid RSDP found (checksum failed or not present)"),
+        },
         "clear" => crate::vga_buffer::clear(),
         "crash" => {
             out("deliberately overflowing the kernel stack...");
