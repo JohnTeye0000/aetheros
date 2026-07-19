@@ -246,6 +246,19 @@ fn dispatch(input: &str) {
                 crate::serial_println!("{}", line1);
                 crate::serial_println!("{}", line2);
                 crate::serial_println!("{}", line3);
+
+                // Walk the RSDT/XSDT the RSDP points to and list every table
+                // it names, checksum-verifying each one along the way.
+                for t in crate::acpi::list_tables(&r) {
+                    let sig = core::str::from_utf8(&t.signature).unwrap_or("????");
+                    let status = if t.checksum_ok { "ok" } else { "BAD CHECKSUM" };
+                    let line = alloc::format!(
+                        "  {}  {:5} bytes  @ {:#010x}  [{}]",
+                        sig, t.length, t.physical_address, status
+                    );
+                    crate::println!("{}", line);
+                    crate::serial_println!("{}", line);
+                }
             }
             None => out("no valid RSDP found (checksum failed or not present)"),
         },
