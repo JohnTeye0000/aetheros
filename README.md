@@ -23,7 +23,7 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Real-time clock** — reads the battery-backed CMOS RTC over I/O ports (decoding BCD and waiting out the "update in progress" flag); `date` prints the live wall-clock time in UTC.
 - [x] **CPU identification (`cpuid`)** — asks the processor to describe itself: vendor string, brand string, family/model/stepping, and feature flags (SSE, MMX, hypervisor, ...), decoded straight from the `cpuid` instruction. `cpuinfo` prints it — the same mechanism behind `lscpu`.
 - [x] **PCI bus enumeration** — walks PCI configuration space over I/O ports `0xCF8`/`0xCFC` and lists what's attached: vendor/device IDs, class, and a name for recognized devices. `lspci` finds the real virtual hardware QEMU exposes (host bridge, IDE controller, VGA, NIC).
-- [x] **ACPI table discovery** — searches the BIOS memory area (the EBDA, then `0xE0000..0xFFFFF`) for the RSDP signature, validates it by checksum, and reports the ACPI version and RSDT/XSDT physical addresses — then walks the RSDT/XSDT itself, checksum-validating and listing every table it names (FADT, MADT/APIC, HPET, ...). `acpi` prints the whole chain.
+- [x] **ACPI table discovery** — searches the BIOS memory area (the EBDA, then `0xE0000..0xFFFFF`) for the RSDP signature, validates it by checksum, and reports the ACPI version and RSDT/XSDT physical addresses — then walks the RSDT/XSDT itself, checksum-validating and listing every table it names (FADT, MADT/APIC, HPET, ...), and finally **decodes the MADT's entries** to report how many CPU cores the machine actually has and where its I/O APIC lives. `acpi` prints the whole chain — genuine groundwork for future multi-core support.
 - [x] **Read-write in-memory filesystem (ramdisk)** — files live on the kernel heap (a `Vec<File>` with owned `String`s), so they can be **created, read, and deleted at runtime**: `ls`, `cat <file>`, `write <file> <text>`, `rm <file>`. (In-memory only — lost on reboot until there's a disk driver.)
 - [x] **Memory introspection** — the allocator tracks live usage and the boot memory map is tallied for total RAM; `mem` reports heap bytes-in-use + allocation count and total usable RAM (like a tiny `free`).
 - [x] **Stack-overflow hardening (GDT + TSS + IST)** — a Global Descriptor Table and Task State Segment give the double-fault handler its own **Interrupt Stack Table** stack, so a kernel stack overflow is *caught and reported* instead of escalating to a triple-fault reboot. The `crash` command proves it.
@@ -32,10 +32,10 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 
 ### Proof it boots
 
-Driving the shell interactively — `acpi` finds the RSDP, then walks the RSDT it
-points to, checksum-validating and naming every ACPI table on the machine:
+Driving the shell interactively — `acpi` finds the RSDP, walks the RSDT it
+points to, and now decodes the MADT to report the machine's actual CPU count:
 
-![AetherOS shell: acpi walking the RSDP -> RSDT -> table chain](docs/boot-stage18.png)
+![AetherOS shell: acpi walking RSDP -> RSDT -> table chain -> MADT CPU/IOAPIC decode](docs/boot-stage19.png)
 
 A tour over the serial port:
 
@@ -49,6 +49,8 @@ RSDT: 0x7fe2328
   APIC    120 bytes  @ 0x07fe2250  [ok]
   HPET     56 bytes  @ 0x07fe22c8  [ok]
   WAET     40 bytes  @ 0x07fe2300  [ok]
+MADT: 1 CPU core(s) (APIC ids: 0)
+MADT: I/O APIC id 0 @ 0xfec00000 (GSI base 0)
 aether> lspci
 00:00.0 8086:1237  Intel 82441FX host bridge (bridge)
 00:01.0 8086:7000  Intel PIIX3 ISA bridge (bridge)
@@ -76,7 +78,8 @@ aether> history
   6  history
 ```
 
-(An earlier version of this shot, before RSDT walking, is `docs/boot-stage17.png`.)
+(Earlier versions of this shot — before RSDT walking, and before MADT decoding
+— are `docs/boot-stage17.png` and `docs/boot-stage18.png`.)
 
 The fault demos are dramatic too: `crash` overflows the stack (the double-fault
 handler catches it on its IST stack instead of rebooting — `docs/boot-stage12.png`),
@@ -106,7 +109,7 @@ Each item is a real, independently-committable capability — built in order, ro
 - [x] Real-time clock (CMOS RTC → `date`)
 - [x] CPU identification (`cpuid` → `cpuinfo`)
 - [x] PCI bus enumeration (`lspci`)
-- [x] ACPI RSDP discovery, then RSDT/XSDT table walking (`acpi`)
+- [x] ACPI RSDP discovery, then RSDT/XSDT table walking, then MADT CPU/IOAPIC decode (`acpi`)
 - [ ] Preemptive scheduling; a real disk-backed filesystem
 
 ## How it boots

@@ -249,7 +249,8 @@ fn dispatch(input: &str) {
 
                 // Walk the RSDT/XSDT the RSDP points to and list every table
                 // it names, checksum-verifying each one along the way.
-                for t in crate::acpi::list_tables(&r) {
+                let tables = crate::acpi::list_tables(&r);
+                for t in &tables {
                     let sig = core::str::from_utf8(&t.signature).unwrap_or("????");
                     let status = if t.checksum_ok { "ok" } else { "BAD CHECKSUM" };
                     let line = alloc::format!(
@@ -258,6 +259,40 @@ fn dispatch(input: &str) {
                     );
                     crate::println!("{}", line);
                     crate::serial_println!("{}", line);
+                }
+
+                // If we found the MADT (signature "APIC"), decode its entries
+                // to answer the question a future multi-core kernel needs
+                // first: how many CPU cores does this machine actually have?
+                if let Some(madt_table) = tables.iter().find(|t| &t.signature == b"APIC") {
+                    if let Some(madt) = crate::acpi::parse_madt(madt_table) {
+                        // Build "0, 1, 2" by hand rather than Vec::join, which
+                        // needs an extra trait import (`alloc::slice::Join`)
+                        // that's part of std's prelude but not core's/alloc's.
+                        let mut ids = alloc::string::String::new();
+                        for (i, id) in madt.cpu_apic_ids.iter().enumerate() {
+                            if i > 0 {
+                                ids.push_str(", ");
+                            }
+                            ids.push_str(&alloc::format!("{}", id));
+                        }
+                        let cpu_line = alloc::format!(
+                            "MADT: {} CPU core(s) (APIC ids: {})",
+                            madt.cpu_apic_ids.len(),
+                            ids
+                        );
+                        crate::println!("{}", cpu_line);
+                        crate::serial_println!("{}", cpu_line);
+
+                        for (id, addr, gsi) in &madt.io_apics {
+                            let io_line = alloc::format!(
+                                "MADT: I/O APIC id {} @ {:#x} (GSI base {})",
+                                id, addr, gsi
+                            );
+                            crate::println!("{}", io_line);
+                            crate::serial_println!("{}", io_line);
+                        }
+                    }
                 }
             }
             None => out("no valid RSDP found (checksum failed or not present)"),

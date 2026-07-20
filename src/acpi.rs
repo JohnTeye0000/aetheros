@@ -12,9 +12,10 @@
 //! Once the RSDP is in hand, `list_tables` walks the next layer: the **RSDT**
 //! (or, on ACPI 2.0+, the **XSDT**) — a table that is itself just an array of
 //! pointers to every other ACPI table on the machine (the FADT, the MADT/APIC
-//! table, HPET, ...). We don't decode any of *those* tables' contents yet; we
-//! just find and validate each one, which is the necessary next step before
-//! any of them can be understood.
+//! table, HPET, ...). We find and validate each one, but decode the *contents*
+//! of only one so far: `parse_madt` reads the **MADT** to answer the question
+//! a future multi-core kernel needs answered first — how many CPU cores does
+//! this machine actually have?
 
 use alloc::vec::Vec;
 
@@ -187,4 +188,82 @@ pub fn list_tables(rsdp: &RsdpInfo) -> Vec<TableInfo> {
     }
 
     tables
+}
+
+/// What the MADT (the table with signature `"APIC"`) says about the machine's
+/// interrupt-controller topology — most usefully, how many CPU cores exist.
+pub struct MadtInfo {
+    pub local_apic_address: u32,
+    /// One entry per **enabled** processor local APIC — in practice, one per
+    /// usable CPU core. This is the number a future multi-core kernel would
+    /// read to know how many cores it has to bring up.
+    pub cpu_apic_ids: Vec<u8>,
+    /// One entry per I/O APIC: `(id, address, global_system_interrupt_base)`.
+    pub io_apics: Vec<(u8, u32, u32)>,
+}
+
+/// Parse the MADT's variable-length entry list.
+///
+/// After the standard 36-byte SDT header, the MADT has an 8-byte fixed part
+/// (the local APIC's physical address, then a flags word), followed by a
+/// stream of `(type: u8, length: u8, ...type-specific data...)` entries
+/// packed back-to-back until the table ends. We only decode the two entry
+/// types we care about right now (0 = processor local APIC, 1 = I/O APIC);
+/// everything else we skip using its length, which is exactly what a real
+/// parser does with entry types it doesn't (yet) understand — the length
+/// byte is what makes the format forward-compatible.
+pub fn parse_madt(table: &TableInfo) -> Option<MadtInfo> {
+    if &table.signature != b"APIC" {
+        return None;
+    }
+
+    let data = unsafe { read_bytes(table.physical_address, table.length as usize) };
+    if data.len() < SDT_HEADER_LEN + 8 {
+        return None;
+    }
+
+    let local_apic_address = u32::from_le_bytes(
+        data[SDT_HEADER_LEN..SDT_HEADER_LEN + 4].try_into().ok()?,
+    );
+
+    let mut cpu_apic_ids = Vec::new();
+    let mut io_apics = Vec::new();
+
+    let mut i = SDT_HEADER_LEN + 8; // past the header and the two fixed fields
+    while i + 2 <= data.len() {
+        let entry_type = data[i];
+        let entry_len = data[i + 1] as usize;
+        if entry_len < 2 || i + entry_len > data.len() {
+            break; // a malformed length would read past the table; stop rather than guess
+        }
+
+        match entry_type {
+            // Processor Local APIC: ACPI Processor ID, APIC ID, then a 4-byte
+            // flags word whose bit 0 says whether this CPU is actually usable.
+            0 if entry_len >= 8 => {
+                let apic_id = data[i + 3];
+                let flags = u32::from_le_bytes(data[i + 4..i + 8].try_into().ok()?);
+                if flags & 1 != 0 {
+                    cpu_apic_ids.push(apic_id);
+                }
+            }
+            // I/O APIC: its own ID, physical address, and the first global
+            // system interrupt (GSI) number it's responsible for.
+            1 if entry_len >= 12 => {
+                let id = data[i + 2];
+                let address = u32::from_le_bytes(data[i + 4..i + 8].try_into().ok()?);
+                let gsi_base = u32::from_le_bytes(data[i + 8..i + 12].try_into().ok()?);
+                io_apics.push((id, address, gsi_base));
+            }
+            _ => {} // interrupt source overrides, NMIs, etc. — not needed yet
+        }
+
+        i += entry_len;
+    }
+
+    Some(MadtInfo {
+        local_apic_address,
+        cpu_apic_ids,
+        io_apics,
+    })
 }
