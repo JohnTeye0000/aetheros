@@ -22,6 +22,7 @@ mod allocator;
 mod cpu;
 mod fs;
 mod gdt;
+mod hpet;
 mod interrupts;
 mod memory;
 mod pci;

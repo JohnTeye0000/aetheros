@@ -140,7 +140,7 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  date  mem  cpuinfo  lspci  acpi  clear  history  crash  pagefault");
+            out("  help  echo  about  ticks  date  mem  cpuinfo  lspci  acpi  hpet  clear  history  crash  pagefault");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
@@ -297,6 +297,51 @@ fn dispatch(input: &str) {
             }
             None => out("no valid RSDP found (checksum failed or not present)"),
         },
+        "hpet" => {
+            // Same "find the ACPI table by signature, then decode its
+            // contents" shape as the MADT handling in `acpi` above — but this
+            // table's contents point at a real memory-mapped device instead
+            // of describing more ACPI structures.
+            let rsdp = crate::acpi::find_rsdp();
+            let table = rsdp
+                .as_ref()
+                .and_then(|r| crate::acpi::list_tables(r).into_iter().find(|t| &t.signature == b"HPET"));
+            match table.and_then(|t| crate::hpet::read(&t)) {
+                Some(h) => {
+                    let line1 = alloc::format!(
+                        "HPET base {:#x}  {}-bit counter  {} comparator(s)",
+                        h.base_address,
+                        if h.counter_is_64bit { 64 } else { 32 },
+                        h.num_timers
+                    );
+                    // Integer-only MHz (whole.fractional), not floating point —
+                    // this kernel deliberately runs without SSE/hardware float
+                    // (see gdt.rs/target config), so plain u64 math is not just
+                    // simpler here, it's the appropriate tool.
+                    let freq_hz: u64 = 1_000_000_000_000_000u64 / h.period_femtoseconds as u64;
+                    let line2 = alloc::format!(
+                        "tick period: {} fs ({}.{:03} MHz)",
+                        h.period_femtoseconds,
+                        freq_hz / 1_000_000,
+                        (freq_hz % 1_000_000) / 1000
+                    );
+                    let line3 = if h.we_enabled_it {
+                        alloc::string::String::from("counter was disabled - enabled it ourselves")
+                    } else {
+                        alloc::string::String::from("counter was already running")
+                    };
+                    let line4 = alloc::format!(
+                        "counter: {} -> {}  ({} ns elapsed)",
+                        h.counter_before, h.counter_after, h.elapsed_ns()
+                    );
+                    for line in [&line1, &line2, &line3, &line4] {
+                        crate::println!("{}", line);
+                        crate::serial_println!("{}", line);
+                    }
+                }
+                None => out("no HPET found (table missing, or not signed \"HPET\")"),
+            }
+        }
         "clear" => crate::vga_buffer::clear(),
         "crash" => {
             out("deliberately overflowing the kernel stack...");
