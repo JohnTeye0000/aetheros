@@ -140,7 +140,7 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  date  mem  cpuinfo  lspci  acpi  hpet  clear  history  crash  pagefault");
+            out("  help  echo  about  ticks  date  mem  cpuinfo  lspci  acpi  hpet  disk  clear  history  crash  pagefault");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
@@ -342,6 +342,49 @@ fn dispatch(input: &str) {
                 None => out("no HPET found (table missing, or not signed \"HPET\")"),
             }
         }
+        "disk" => match crate::ata::identify_primary_master() {
+            Some(id) => {
+                let model = core::str::from_utf8(&id.model).unwrap_or("?").trim();
+                let bytes = id.sectors_28bit as u64 * 512;
+                let line1 = alloc::format!("primary master: \"{}\"", model);
+                // This kernel's own boot image is well under 1 MiB, so report
+                // KiB when the disk is small rather than rounding a genuine
+                // ~700 KiB down to a misleading "0 MiB".
+                let line2 = if bytes >= 1024 * 1024 {
+                    alloc::format!(
+                        "{} sectors ({} MiB, 28-bit LBA)",
+                        id.sectors_28bit, bytes / (1024 * 1024)
+                    )
+                } else {
+                    alloc::format!(
+                        "{} sectors ({} KiB, 28-bit LBA)",
+                        id.sectors_28bit, bytes / 1024
+                    )
+                };
+                crate::println!("{}", line1);
+                crate::println!("{}", line2);
+                crate::serial_println!("{}", line1);
+                crate::serial_println!("{}", line2);
+
+                // Read sector 0 for real (READ SECTORS, no writes anywhere in
+                // this driver) and check the boot signature every MBR-style
+                // sector ends with — proof the bytes we got back are genuine.
+                match crate::ata::read_sector(0) {
+                    Some(sector) => {
+                        let sig_ok = sector[510] == 0x55 && sector[511] == 0xAA;
+                        let line3 = alloc::format!(
+                            "sector 0: last bytes {:#04x} {:#04x}  boot signature: {}",
+                            sector[510], sector[511],
+                            if sig_ok { "valid (0x55AA)" } else { "unexpected" }
+                        );
+                        crate::println!("{}", line3);
+                        crate::serial_println!("{}", line3);
+                    }
+                    None => out("sector 0 read failed"),
+                }
+            }
+            None => out("no ATA drive found on the primary bus"),
+        },
         "clear" => crate::vga_buffer::clear(),
         "crash" => {
             out("deliberately overflowing the kernel stack...");

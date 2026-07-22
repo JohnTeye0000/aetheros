@@ -19,6 +19,7 @@ use bootloader::{entry_point, BootInfo};
 
 mod acpi;
 mod allocator;
+mod ata;
 mod cpu;
 mod fs;
 mod gdt;
