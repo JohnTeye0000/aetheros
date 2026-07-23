@@ -8,11 +8,16 @@
 //!   2. Hand that range to an allocator registered as the `#[global_allocator]`,
 //!      so every `Box`/`Vec`/`String` allocation routes through it.
 //!
-//! The allocator here is a hand-written **bump allocator** — the simplest design
-//! there is. See `BumpAllocator` below for how (and why) it works.
+//! Stage 5 built a **bump allocator** here — the simplest design there is, but
+//! one that could only reclaim memory once *every* allocation was freed at
+//! once. This stage replaces it with a **free-list allocator**: individual
+//! blocks can now be freed and reused independently. See `LinkedListAllocator`
+//! below for how it works.
 
 use core::alloc::{GlobalAlloc, Layout};
+use core::mem;
 use core::ptr;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 use x86_64::{
     structures::paging::{
@@ -30,7 +35,12 @@ pub const HEAP_SIZE: usize = 100 * 1024; // 100 KiB
 /// The global allocator instance. `#[global_allocator]` tells Rust to route all
 /// `alloc` allocations through it. It starts empty; `init_heap` fills it in.
 #[global_allocator]
-static ALLOCATOR: Locked<BumpAllocator> = Locked::new(BumpAllocator::new());
+static ALLOCATOR: Locked<LinkedListAllocator> = Locked::new(LinkedListAllocator::new());
+
+/// How many allocations are currently live — incremented on a successful
+/// `alloc`, decremented on every `dealloc`. Purely for the `mem` shell command;
+/// the allocator itself doesn't need this to function.
+static LIVE_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
 /// Map the heap's pages to physical frames, then hand the region to the
 /// allocator. Call once, after paging is up, before any heap allocation.
@@ -66,75 +76,172 @@ pub fn init_heap(
     Ok(())
 }
 
-/// A **bump allocator**: the simplest possible heap allocator.
-///
-/// It keeps a single pointer, `next`, starting at the bottom of the heap. Each
-/// allocation rounds `next` up to the required alignment, hands back that
-/// address, and bumps `next` past the new block. Allocation is therefore just a
-/// pointer add — extremely fast.
-///
-/// The catch is freeing: a bump allocator can't reclaim an individual block,
-/// because it only remembers one pointer. So it counts live allocations and
-/// only resets `next` to the start once that count hits zero (everything freed).
-/// That's a real limitation — a smarter allocator (free lists) is a later
-/// milestone — but it's perfect for understanding the core idea.
-pub struct BumpAllocator {
-    heap_start: usize,
-    heap_end: usize,
-    next: usize,
-    allocations: usize,
+/// One free block of heap memory, described by a node **stored inside the
+/// block itself** — freeing memory costs nothing extra because the freed
+/// memory *is* the bookkeeping. `size` is how big the block is; `next` links
+/// to the next free block, forming a singly-linked list threaded through
+/// whatever memory happens to be unused right now.
+struct ListNode {
+    size: usize,
+    next: Option<&'static mut ListNode>,
 }
 
-impl BumpAllocator {
+impl ListNode {
+    const fn new(size: usize) -> Self {
+        ListNode { size, next: None }
+    }
+    fn start_addr(&self) -> usize {
+        self as *const Self as usize
+    }
+    fn end_addr(&self) -> usize {
+        self.start_addr() + self.size
+    }
+}
+
+/// A **free-list allocator**: instead of one bump pointer, it keeps a linked
+/// list of every free block, sorted by nothing in particular — new free
+/// regions are just pushed onto the front.
+///
+/// **Allocating** walks the list looking for the first block big enough (and
+/// with a usable aligned start) to hold the request — "first fit". If the
+/// block is bigger than needed, the leftover tail becomes a new, smaller free
+/// block instead of being wasted.
+///
+/// **Freeing** is just: turn the returned memory back into a `ListNode` and
+/// push it onto the front of the list. No search, no bookkeeping table
+/// elsewhere — the freed memory becomes its own record.
+///
+/// The real gain over Stage 5's bump allocator: freeing block A and then
+/// allocating block B of the same size will hand back A's exact old address,
+/// because A is now sitting right at the front of the free list. A bump
+/// allocator could never do that — it could only reclaim space once
+/// *everything* was freed at once.
+pub struct LinkedListAllocator {
+    head: ListNode,
+}
+
+impl LinkedListAllocator {
     pub const fn new() -> Self {
-        BumpAllocator {
-            heap_start: 0,
-            heap_end: 0,
-            next: 0,
-            allocations: 0,
+        LinkedListAllocator {
+            head: ListNode::new(0),
         }
     }
 
     /// # Safety
-    /// The caller must guarantee the given range is unused and stays valid, and
-    /// must call this exactly once.
+    /// The caller must guarantee the given range is unused and stays valid,
+    /// and must call this exactly once before any allocation.
     pub unsafe fn init(&mut self, heap_start: usize, heap_size: usize) {
-        self.heap_start = heap_start;
-        self.heap_end = heap_start.saturating_add(heap_size);
-        self.next = heap_start;
+        self.add_free_region(heap_start, heap_size);
+    }
+
+    /// Add a block of memory to the front of the free list. Used both to seed
+    /// the initial heap and to return a freed block.
+    unsafe fn add_free_region(&mut self, addr: usize, size: usize) {
+        // A block has to be big enough to hold a ListNode (it's about to
+        // become one) and correctly aligned for one.
+        assert_eq!(align_up(addr, mem::align_of::<ListNode>()), addr);
+        assert!(size >= mem::size_of::<ListNode>());
+
+        let mut node = ListNode::new(size);
+        node.next = self.head.next.take();
+        let node_ptr = addr as *mut ListNode;
+        node_ptr.write(node);
+        self.head.next = Some(&mut *node_ptr);
+    }
+
+    /// First-fit search: walk the list, and for the first block that can
+    /// actually satisfy `size`/`align` (via `alloc_from_region`), unlink it
+    /// from the list and return it along with where the allocation should
+    /// start within it.
+    fn find_region(&mut self, size: usize, align: usize) -> Option<(&'static mut ListNode, usize)> {
+        let mut current = &mut self.head;
+        while let Some(ref mut region) = current.next {
+            if let Ok(alloc_start) = Self::alloc_from_region(region, size, align) {
+                // Found one — splice it out of the list before handing it back.
+                let next = region.next.take();
+                let region = current.next.take().unwrap();
+                current.next = next;
+                return Some((region, alloc_start));
+            } else {
+                current = current.next.as_mut().unwrap();
+            }
+        }
+        None
+    }
+
+    /// Check whether `region` can hold `size` bytes at the given `align`, and
+    /// if so, where the allocation would have to start. Fails if the region is
+    /// too small, OR if it's big enough but the *leftover* tail after the
+    /// allocation would be too small to become a `ListNode` of its own (we
+    /// have no way to track leftover space smaller than one node).
+    fn alloc_from_region(region: &ListNode, size: usize, align: usize) -> Result<usize, ()> {
+        let alloc_start = align_up(region.start_addr(), align);
+        let alloc_end = alloc_start.checked_add(size).ok_or(())?;
+        if alloc_end > region.end_addr() {
+            return Err(()); // too small
+        }
+        let excess_size = region.end_addr() - alloc_end;
+        if excess_size > 0 && excess_size < mem::size_of::<ListNode>() {
+            return Err(()); // leftover tail can't hold a ListNode
+        }
+        Ok(alloc_start)
+    }
+
+    /// `GlobalAlloc` gives us a `Layout` (size + alignment); every block we
+    /// hand out or take back must be at least big enough and aligned enough to
+    /// later hold a `ListNode`, since it might become one when freed.
+    fn size_align(layout: Layout) -> (usize, usize) {
+        let layout = layout
+            .align_to(mem::align_of::<ListNode>())
+            .expect("adjusting alignment failed")
+            .pad_to_align();
+        let size = layout.size().max(mem::size_of::<ListNode>());
+        (size, layout.align())
+    }
+
+    /// Sum every free block currently in the list — used by the `mem` shell
+    /// command to report usage (`used = total - free`), computed fresh each
+    /// time rather than tracked incrementally, so it can never drift out of
+    /// sync with the list itself.
+    fn free_bytes(&self) -> usize {
+        let mut total = 0;
+        let mut current = &self.head;
+        while let Some(ref region) = current.next {
+            total += region.size;
+            current = region;
+        }
+        total
     }
 }
 
-// GlobalAlloc's methods take `&self`, but a bump allocator must mutate `next`.
-// We can't implement the foreign `GlobalAlloc` trait on a foreign `Mutex` (the
-// orphan rule), so we wrap the mutex in our own `Locked` type and implement it
-// on that.
-unsafe impl GlobalAlloc for Locked<BumpAllocator> {
+// GlobalAlloc's methods take `&self`, but the allocator must mutate the free
+// list. We can't implement the foreign `GlobalAlloc` trait on a foreign
+// `Mutex` (the orphan rule), so we wrap the mutex in our own `Locked` type and
+// implement it on that.
+unsafe impl GlobalAlloc for Locked<LinkedListAllocator> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let mut bump = self.lock();
+        let (size, align) = LinkedListAllocator::size_align(layout);
+        let mut allocator = self.lock();
 
-        let alloc_start = align_up(bump.next, layout.align());
-        let alloc_end = match alloc_start.checked_add(layout.size()) {
-            Some(end) => end,
-            None => return ptr::null_mut(), // overflow
-        };
-
-        if alloc_end > bump.heap_end {
-            ptr::null_mut() // out of memory
-        } else {
-            bump.next = alloc_end;
-            bump.allocations += 1;
+        if let Some((region, alloc_start)) = allocator.find_region(size, align) {
+            let alloc_end = alloc_start.checked_add(size).expect("overflow");
+            let excess_size = region.end_addr() - alloc_end;
+            if excess_size > 0 {
+                // Leftover space after this allocation becomes its own free
+                // block, rather than being wasted.
+                allocator.add_free_region(alloc_end, excess_size);
+            }
+            LIVE_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
             alloc_start as *mut u8
+        } else {
+            ptr::null_mut() // no region big enough — out of memory
         }
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        let mut bump = self.lock();
-        bump.allocations -= 1;
-        // Only reclaim space once every allocation has been freed.
-        if bump.allocations == 0 {
-            bump.next = bump.heap_start;
-        }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let (size, _) = LinkedListAllocator::size_align(layout);
+        self.lock().add_free_region(ptr as usize, size);
+        LIVE_ALLOCATIONS.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -165,13 +272,13 @@ fn align_up(addr: usize, align: usize) -> usize {
 
 /// Report heap usage: `(bytes_in_use, total_bytes, live_allocations)`.
 ///
-/// "In use" is the bump pointer's distance from the heap start — its
-/// high-water mark. Remember a bump allocator only reclaims space once *every*
-/// allocation has been freed (it then resets `next` to the start), so this is
-/// the honest picture of how a bump allocator actually behaves.
+/// "In use" is computed as `total - free`, walking the free list fresh each
+/// call — so it's always an honest reflection of the list's actual state, not
+/// a separately-tracked number that could drift out of sync with it.
 pub fn heap_stats() -> (usize, usize, usize) {
-    let bump = ALLOCATOR.lock();
-    let used = bump.next.saturating_sub(bump.heap_start);
-    let total = bump.heap_end.saturating_sub(bump.heap_start);
-    (used, total, bump.allocations)
+    let allocator = ALLOCATOR.lock();
+    let total = HEAP_SIZE;
+    let free = allocator.free_bytes();
+    let used = total.saturating_sub(free);
+    (used, total, LIVE_ALLOCATIONS.load(Ordering::Relaxed))
 }

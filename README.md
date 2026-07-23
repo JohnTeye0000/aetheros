@@ -17,9 +17,9 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Hardware interrupts (PIC + timer)** — the 8259 PIC is remapped (vectors 32+) and interrupts are enabled; the PIT timer fires IRQ0 ~18×/sec and the kernel handles each tick (with End-Of-Interrupt) while idling in a `hlt` loop. Execution is now driven by hardware. Printing was made interrupt-safe (locks held with interrupts disabled) to avoid deadlock.
 - [x] **PS/2 keyboard input** — IRQ1 is unmasked and handled; raw scancodes are read from port `0x60` and decoded (via `pc-keyboard`) into characters, which the kernel echoes to the screen. The first time the kernel reacts to *you*.
 - [x] **Paging / virtual memory** — the kernel reads the active page tables (translating any virtual address to its physical frame via the recursive offset map) and **writes its own mappings**: it maps a fresh, unused virtual page onto the VGA frame and prints through it. Plus a bootloader-memory-map frame allocator. The foundation for a heap and, later, separate address spaces.
-- [x] **Kernel heap** — a 100 KiB heap region is mapped and managed by a **bump allocator written from scratch** (no external crate), registered as Rust's `#[global_allocator]`. `Box`, `Vec`, and `String` now work inside the kernel.
+- [x] **Kernel heap** — a 100 KiB heap region is mapped and managed by a **free-list allocator written from scratch** (no external crate), registered as Rust's `#[global_allocator]`. `Box`, `Vec`, and `String` work inside the kernel, and individual blocks are reclaimed on free — allocate, free, allocate again at the same size, and it lands at the exact address just freed (`heaptest` proves it). Originally a simpler bump allocator (Stage 5); upgraded here.
 - [x] **Cooperative multitasking** — an async/await `Task` type and a small round-robin executor (with a hand-built `Waker`). Two async tasks that `yield_now().await` after each step interleave on a single CPU — concurrency without threads or preemption.
-- [x] **Interactive shell** — type a command, press Enter, the kernel runs it. The keyboard interrupt feeds a line buffer; commands: `help`, `echo`, `about`, `ticks`, `date`, `mem`, `cpuinfo`, `lspci`, `acpi`, `hpet`, `disk`, `clear`, `history`, fault demos `crash`/`pagefault`, and a file set `ls`, `cat`, `write`, `rm`, `cp`, `mv`. **You can drive the OS.**
+- [x] **Interactive shell** — type a command, press Enter, the kernel runs it. The keyboard interrupt feeds a line buffer; commands: `help`, `echo`, `about`, `ticks`, `date`, `mem`, `heaptest`, `cpuinfo`, `lspci`, `acpi`, `hpet`, `disk`, `clear`, `history`, fault demos `crash`/`pagefault`, and a file set `ls`, `cat`, `write`, `rm`, `cp`, `mv`. **You can drive the OS.**
 - [x] **Real-time clock** — reads the battery-backed CMOS RTC over I/O ports (decoding BCD and waiting out the "update in progress" flag); `date` prints the live wall-clock time in UTC.
 - [x] **CPU identification (`cpuid`)** — asks the processor to describe itself: vendor string, brand string, family/model/stepping, and feature flags (SSE, MMX, hypervisor, ...), decoded straight from the `cpuid` instruction. `cpuinfo` prints it — the same mechanism behind `lscpu`.
 - [x] **PCI bus enumeration** — walks PCI configuration space over I/O ports `0xCF8`/`0xCFC` and lists what's attached: vendor/device IDs, class, and a name for recognized devices. `lspci` finds the real virtual hardware QEMU exposes (host bridge, IDE controller, VGA, NIC).
@@ -34,16 +34,26 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 
 ### Proof it boots
 
-Driving the shell interactively — `disk` talks to the real IDE controller
-`lspci` found earlier, identifies the drive, and reads its actual sector 0
-(read-only — no write path exists), checking the genuine `0x55AA` boot
-signature at the end:
+Driving the shell interactively — `heaptest` proves the free-list allocator's
+whole point: allocate, free, allocate again at the same size, and it lands
+back at the exact address just freed:
 
-![AetherOS shell: disk reading a real ATA drive via PIO](docs/boot-stage21.png)
+![AetherOS shell: heaptest proving individual-block reclamation](docs/boot-stage22.png)
 
 A tour over the serial port:
 
 ```
+aether> ls
+   90  motd
+  108  readme.txt
+  121  stages.txt
+aether> mem
+heap: 704 / 102400 bytes in use (10 live allocations)
+RAM:  126500864 bytes usable (~120 MiB)
+aether> heaptest
+allocated at 0x444444440770, then freed it
+allocated again (same size) at 0x444444440770
+same address, reused - free-list allocator reclaims individual blocks
 aether> disk
 primary master: "QEMU HARDDISK"
 1485 sectors (742 KiB, 28-bit LBA)
@@ -79,23 +89,23 @@ family: 15  model: 11  stepping: 1
 features: fpu tsc apic mmx sse sse2 sse3 hypervisor
 aether> date
 2026-07-14 12:29:10 UTC
-aether> mem
-heap: 664 / 102400 bytes in use (7 live allocations)
-RAM:  126713856 bytes usable (~120 MiB)
 aether> history
-  1  disk
-  2  hpet
-  3  acpi
-  4  lspci
-  5  cpuinfo
-  6  date
-  7  mem
-  8  history
+  1  ls
+  2  mem
+  3  heaptest
+  4  disk
+  5  hpet
+  6  acpi
+  7  lspci
+  8  cpuinfo
+  9  date
+ 10  history
 ```
 
 (Earlier versions of this shot — before RSDT walking, before MADT decoding,
-before HPET, and before the disk driver — are `docs/boot-stage17.png`,
-`docs/boot-stage18.png`, `docs/boot-stage19.png`, and `docs/boot-stage20.png`.)
+before HPET, before the disk driver, and before the free-list allocator — are
+`docs/boot-stage17.png`, `docs/boot-stage18.png`, `docs/boot-stage19.png`,
+`docs/boot-stage20.png`, and `docs/boot-stage21.png`.)
 
 The fault demos are dramatic too: `crash` overflows the stack (the double-fault
 handler catches it on its IST stack instead of rebooting — `docs/boot-stage12.png`),
@@ -128,6 +138,7 @@ Each item is a real, independently-committable capability — built in order, ro
 - [x] ACPI RSDP discovery, then RSDT/XSDT table walking, then MADT CPU/IOAPIC decode (`acpi`)
 - [x] HPET via memory-mapped I/O — first non-port-I/O hardware access (`hpet`)
 - [x] A real disk driver — ATA PIO, read-only (`disk`)
+- [x] Upgraded the heap to a free-list allocator — individual blocks reclaimed, not just bump-and-reset (`heaptest`)
 - [ ] Preemptive scheduling; a disk-backed (not in-memory) filesystem
 
 ## How it boots
@@ -164,7 +175,7 @@ src/pci.rs         PCI config-space enumeration (the `lspci` command)
 src/acpi.rs        RSDP/RSDT/XSDT/MADT discovery + decoding (`acpi` command)
 src/hpet.rs         HPET via memory-mapped I/O (the `hpet` command)
 src/ata.rs          ATA PIO disk access, read-only (the `disk` command)
-src/allocator.rs   kernel heap region + hand-written bump allocator
+src/allocator.rs   kernel heap region + hand-written free-list allocator
 src/task/          async Task type + cooperative round-robin executor
 src/shell.rs       interactive command shell (line buffer + commands)
 src/fs.rs          read-only in-memory filesystem (ramdisk)

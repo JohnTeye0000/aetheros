@@ -140,7 +140,7 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  date  mem  cpuinfo  lspci  acpi  hpet  disk  clear  history  crash  pagefault");
+            out("  help  echo  about  ticks  date  mem  heaptest  cpuinfo  lspci  acpi  hpet  disk  clear  history  crash  pagefault");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
@@ -173,6 +173,34 @@ fn dispatch(input: &str) {
                 "heap {}/{} bytes, {} allocs; RAM {} bytes",
                 used, total, allocs, ram
             );
+        }
+        "heaptest" => {
+            // Allocate, free, then allocate again at the same size. A bump
+            // allocator (Stage 5's original design) could only reclaim space
+            // once EVERY allocation was freed at once; this free-list
+            // allocator reclaims individual blocks, so the second allocation
+            // should land at exactly the address the first one just vacated.
+            use alloc::boxed::Box;
+            let a = Box::new(0xAAu8);
+            let addr_a = &*a as *const u8 as usize;
+            drop(a); // returned to the free list immediately
+
+            let b = Box::new(0xBBu8);
+            let addr_b = &*b as *const u8 as usize;
+
+            let line1 = alloc::format!("allocated at {:#x}, then freed it", addr_a);
+            let line2 = alloc::format!("allocated again (same size) at {:#x}", addr_b);
+            let line3 = if addr_a == addr_b {
+                alloc::string::String::from(
+                    "same address, reused - free-list allocator reclaims individual blocks",
+                )
+            } else {
+                alloc::string::String::from("different address (unexpected for this allocator)")
+            };
+            for line in [&line1, &line2, &line3] {
+                crate::println!("{}", line);
+                crate::serial_println!("{}", line);
+            }
         }
         "cpuinfo" => {
             let info = crate::cpu::identify();
