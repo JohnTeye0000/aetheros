@@ -19,6 +19,7 @@ use core::mem;
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
+use x86_64::instructions::interrupts;
 use x86_64::{
     structures::paging::{
         mapper::MapToError, FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB,
@@ -30,7 +31,7 @@ use x86_64::{
 /// arbitrary — a chunk of the vast unused virtual space that won't collide with
 /// the kernel, the stack, or the physical-memory map.
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-pub const HEAP_SIZE: usize = 100 * 1024; // 100 KiB
+pub const HEAP_SIZE: usize = 512 * 1024; // 512 KiB (room for thread stacks)
 
 /// The global allocator instance. `#[global_allocator]` tells Rust to route all
 /// `alloc` allocations through it. It starts empty; `init_heap` fills it in.
@@ -276,9 +277,11 @@ fn align_up(addr: usize, align: usize) -> usize {
 /// call — so it's always an honest reflection of the list's actual state, not
 /// a separately-tracked number that could drift out of sync with it.
 pub fn heap_stats() -> (usize, usize, usize) {
-    let allocator = ALLOCATOR.lock();
-    let total = HEAP_SIZE;
-    let free = allocator.free_bytes();
-    let used = total.saturating_sub(free);
-    (used, total, LIVE_ALLOCATIONS.load(Ordering::Relaxed))
+    interrupts::without_interrupts(|| {
+        let allocator = ALLOCATOR.lock();
+        let total = HEAP_SIZE;
+        let free = allocator.free_bytes();
+        let used = total.saturating_sub(free);
+        (used, total, LIVE_ALLOCATIONS.load(Ordering::Relaxed))
+    })
 }

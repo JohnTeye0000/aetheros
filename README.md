@@ -19,7 +19,7 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Paging / virtual memory** — the kernel reads the active page tables (translating any virtual address to its physical frame via the recursive offset map) and **writes its own mappings**: it maps a fresh, unused virtual page onto the VGA frame and prints through it. Plus a bootloader-memory-map frame allocator. The foundation for a heap and, later, separate address spaces.
 - [x] **Kernel heap** — a 100 KiB heap region is mapped and managed by a **free-list allocator written from scratch** (no external crate), registered as Rust's `#[global_allocator]`. `Box`, `Vec`, and `String` work inside the kernel, and individual blocks are reclaimed on free — allocate, free, allocate again at the same size, and it lands at the exact address just freed (`heaptest` proves it). Originally a simpler bump allocator (Stage 5); upgraded here.
 - [x] **Cooperative multitasking** — an async/await `Task` type and a small round-robin executor (with a hand-built `Waker`). Two async tasks that `yield_now().await` after each step interleave on a single CPU — concurrency without threads or preemption.
-- [x] **Interactive shell** — type a command, press Enter, the kernel runs it. The keyboard interrupt feeds a line buffer; commands: `help`, `echo`, `about`, `ticks`, `date`, `mem`, `heaptest`, `cpuinfo`, `lspci`, `acpi`, `hpet`, `disk`, `clear`, `history`, fault demos `crash`/`pagefault`, and a file set `ls`, `cat`, `write`, `rm`, `cp`, `mv`. **You can drive the OS.**
+- [x] **Interactive shell** — type a command, press Enter, the kernel runs it. The keyboard interrupt feeds a line buffer; commands: `help`, `echo`, `about`, `ticks`, `date`, `mem`, `threads`, `heaptest`, `cpuinfo`, `lspci`, `acpi`, `hpet`, `disk`, `clear`, `history`, fault demos `crash`/`pagefault`, and a file set `ls`, `cat`, `write`, `rm`, `cp`, `mv`. **You can drive the OS.**
 - [x] **Real-time clock** — reads the battery-backed CMOS RTC over I/O ports (decoding BCD and waiting out the "update in progress" flag); `date` prints the live wall-clock time in UTC.
 - [x] **CPU identification (`cpuid`)** — asks the processor to describe itself: vendor string, brand string, family/model/stepping, and feature flags (SSE, MMX, hypervisor, ...), decoded straight from the `cpuid` instruction. `cpuinfo` prints it — the same mechanism behind `lscpu`.
 - [x] **PCI bus enumeration** — walks PCI configuration space over I/O ports `0xCF8`/`0xCFC` and lists what's attached: vendor/device IDs, class, and a name for recognized devices. `lspci` finds the real virtual hardware QEMU exposes (host bridge, IDE controller, VGA, NIC).
@@ -30,91 +30,32 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Memory introspection** — the allocator tracks live usage and the boot memory map is tallied for total RAM; `mem` reports heap bytes-in-use + allocation count and total usable RAM (like a tiny `free`).
 - [x] **Stack-overflow hardening (GDT + TSS + IST)** — a Global Descriptor Table and Task State Segment give the double-fault handler its own **Interrupt Stack Table** stack, so a kernel stack overflow is *caught and reported* instead of escalating to a triple-fault reboot. The `crash` command proves it.
 - [x] **Page-fault diagnostics** — a page-fault handler that reports the faulting virtual address (from `CR2`) and decodes the error code (read vs write, present vs protection). The `pagefault` command triggers one on an unmapped address to show it.
+- [x] **Preemptive multitasking** — kernel threads switched by the timer interrupt. A hand-written `switch_context` (15 instructions of assembly) swaps callee-saved registers and stack pointers inside the timer handler; new threads start on a forged stack frame. Three demo workers spin in loops that *never yield* and all three make progress — `threads` shows their counters climbing. Required making the heap lock interrupt-safe. (Stage 6's cooperative executor is still there.)
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
-Driving the shell interactively — `heaptest` proves the free-list allocator's
-whole point: allocate, free, allocate again at the same size, and it lands
-back at the exact address just freed:
+`threads` twice, a few seconds apart. The three workers never yield — their counters can only climb because the timer interrupt is taking the CPU away from each of them in turn:
 
-![AetherOS shell: heaptest proving individual-block reclamation](docs/boot-stage22.png)
+![boot-stage23.png](docs/boot-stage23.png)
 
-A tour over the serial port:
+From the serial log:
 
 ```
-aether> ls
-   90  motd
-  108  readme.txt
-  121  stages.txt
-aether> mem
-heap: 704 / 102400 bytes in use (10 live allocations)
-RAM:  126500864 bytes usable (~120 MiB)
-aether> heaptest
-allocated at 0x444444440770, then freed it
-allocated again (same size) at 0x444444440770
-same address, reused - free-list allocator reclaims individual blocks
-aether> disk
-primary master: "QEMU HARDDISK"
-1485 sectors (742 KiB, 28-bit LBA)
-sector 0: last bytes 0x55 0xaa  boot signature: valid (0x55AA)
-aether> hpet
-HPET base 0xfed00000  64-bit counter  3 comparator(s)
-tick period: 10000000 fs (100.000 MHz)
-counter was disabled - enabled it ourselves
-counter: 19400 -> 28284960  (282655600 ns elapsed)
-aether> acpi
-RSDP found at physical 0xf52e0
-OEM: BOCHS   ACPI version: 1.0 (RSDT only)
-RSDT: 0x7fe2328
-  RSDT     52 bytes  @ 0x07fe2328  [ok]
-  FACP    116 bytes  @ 0x07fe21dc  [ok]
-  APIC    120 bytes  @ 0x07fe2250  [ok]
-  HPET     56 bytes  @ 0x07fe22c8  [ok]
-  WAET     40 bytes  @ 0x07fe2300  [ok]
-MADT: 1 CPU core(s) (APIC ids: 0)
-MADT: I/O APIC id 0 @ 0xfec00000 (GSI base 0)
-aether> lspci
-00:00.0 8086:1237  Intel 82441FX host bridge (bridge)
-00:01.0 8086:7000  Intel PIIX3 ISA bridge (bridge)
-00:01.1 8086:7010  Intel PIIX3 IDE controller (mass storage)
-00:01.3 8086:7113  Intel PIIX4 ACPI (bridge)
-00:02.0 1234:1111  QEMU standard VGA (display)
-00:03.0 8086:100e  Intel e1000 network card (network)
-6 device(s) on bus 0
-aether> cpuinfo
-vendor: AuthenticAMD
-brand:  QEMU Virtual CPU version 2.5+
-family: 15  model: 11  stepping: 1
-features: fpu tsc apic mmx sse sse2 sse3 hypervisor
-aether> date
-2026-07-14 12:29:10 UTC
-aether> history
-  1  ls
-  2  mem
-  3  heaptest
-  4  disk
-  5  hpet
-  6  acpi
-  7  lspci
-  8  cpuinfo
-  9  date
- 10  history
+aether> threads
+  id  name         state    switches  work
+   0  kernel_main  ready           9  -
+   1  worker-a     running        10  2165622
+   2  worker-b     ready           9  2136238
+   3  worker-c     ready           9  2151514
+aether> threads
+   0  kernel_main  ready          36  -
+   1  worker-a     running        37  8388842
+   2  worker-b     ready          36  8517186
+   3  worker-c     ready          36  8558950
 ```
 
-(Earlier versions of this shot — before RSDT walking, before MADT decoding,
-before HPET, before the disk driver, and before the free-list allocator — are
-`docs/boot-stage17.png`, `docs/boot-stage18.png`, `docs/boot-stage19.png`,
-`docs/boot-stage20.png`, and `docs/boot-stage21.png`.)
-
-The fault demos are dramatic too: `crash` overflows the stack (the double-fault
-handler catches it on its IST stack instead of rebooting — `docs/boot-stage12.png`),
-and `pagefault` writes to an unmapped address (the page-fault handler reports the
-address + cause — `docs/boot-stage13.png`).
-
-(Every earlier stage prints its own proof too — exceptions, the timer, paging
-(a self-mapped "New!" on screen), the heap, and two async tasks interleaving.
-Screenshots: `docs/boot-stage0..6.png`.)
+Every stage has its own screenshot in `docs/`: [0](docs/boot-stage0.png) · [1](docs/boot-stage1.png) · [2](docs/boot-stage2.png) · [3](docs/boot-stage3.png) · [4](docs/boot-stage4.png) · [5](docs/boot-stage5.png) · [6](docs/boot-stage6.png) · [7](docs/boot-stage7.png) · [8](docs/boot-stage8.png) · [9](docs/boot-stage9.png) · [10](docs/boot-stage10.png) · [11](docs/boot-stage11.png) · [12](docs/boot-stage12.png) · [13](docs/boot-stage13.png) · [14](docs/boot-stage14.png) · [15](docs/boot-stage15.png) · [16](docs/boot-stage16.png) · [17](docs/boot-stage17.png) · [18](docs/boot-stage18.png) · [19](docs/boot-stage19.png) · [20](docs/boot-stage20.png) · [21](docs/boot-stage21.png) · [22](docs/boot-stage22.png) · [23](docs/boot-stage23.png)
 
 ## The build arc (the roadmap)
 
@@ -125,7 +66,7 @@ Each item is a real, independently-committable capability — built in order, ro
 - [x] PS/2 keyboard input
 - [x] Physical memory: paging, a frame allocator
 - [x] A kernel heap + allocator (`alloc` support: `Box`, `Vec`)
-- [x] Cooperative multitasking (async/await executor) · [ ] preemptive next
+- [x] Cooperative multitasking (async/await executor)
 - [x] A tiny in-kernel shell
 - [x] A ramdisk filesystem — now read-write (`ls`, `cat`, `write`, `rm`)
 - [x] Memory introspection (`mem`: heap + RAM stats)
@@ -139,7 +80,8 @@ Each item is a real, independently-committable capability — built in order, ro
 - [x] HPET via memory-mapped I/O — first non-port-I/O hardware access (`hpet`)
 - [x] A real disk driver — ATA PIO, read-only (`disk`)
 - [x] Upgraded the heap to a free-list allocator — individual blocks reclaimed, not just bump-and-reset (`heaptest`)
-- [ ] Preemptive scheduling; a disk-backed (not in-memory) filesystem
+- [x] Preemptive multitasking — timer-driven context switching between kernel threads (`threads`)
+- [ ] A disk-backed (not in-memory) filesystem
 
 ## How it boots
 
@@ -178,7 +120,8 @@ src/ata.rs          ATA PIO disk access, read-only (the `disk` command)
 src/allocator.rs   kernel heap region + hand-written free-list allocator
 src/task/          async Task type + cooperative round-robin executor
 src/shell.rs       interactive command shell (line buffer + commands)
-src/fs.rs          read-only in-memory filesystem (ramdisk)
+src/fs.rs          in-memory read-write filesystem (ramdisk)
+src/scheduler.rs   preemptive kernel threads: context switch, spawn, round-robin
 .cargo/config.toml build-std + target + bootimage runner config
 docs/              boot screenshots + devlog/ (plain-English notes per milestone)
 ```

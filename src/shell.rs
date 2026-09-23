@@ -140,7 +140,7 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  date  mem  heaptest  cpuinfo  lspci  acpi  hpet  disk  clear  history  crash  pagefault");
+            out("  help  echo  about  ticks  date  mem  threads  heaptest  cpuinfo  lspci  acpi  hpet  disk  clear  history  crash  pagefault");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
@@ -173,6 +173,33 @@ fn dispatch(input: &str) {
                 "heap {}/{} bytes, {} allocs; RAM {} bytes",
                 used, total, allocs, ram
             );
+        }
+        "threads" => {
+            // Each row: thread id, name, state, how many times the scheduler
+            // switched INTO it, and (for the demo workers) its work counter.
+            // The counters are the proof of preemption: the workers never
+            // yield, so if they climb, the timer is taking the CPU by force.
+            out("  id  name         state    switches  work");
+            for t in crate::scheduler::snapshot() {
+                let work = match t.name.as_str() {
+                    "worker-a" => Some(0),
+                    "worker-b" => Some(1),
+                    "worker-c" => Some(2),
+                    _ => None,
+                };
+                let line = match work {
+                    Some(i) => alloc::format!(
+                        "{:>4}  {:<11}  {:<7}  {:>8}  {}",
+                        t.id, t.name, t.state.name(), t.switches,
+                        crate::scheduler::WORK[i].load(core::sync::atomic::Ordering::Relaxed)
+                    ),
+                    None => alloc::format!(
+                        "{:>4}  {:<11}  {:<7}  {:>8}  -",
+                        t.id, t.name, t.state.name(), t.switches
+                    ),
+                };
+                out(&line);
+            }
         }
         "heaptest" => {
             // Allocate, free, then allocate again at the same size. A bump

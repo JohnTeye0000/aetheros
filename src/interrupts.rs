@@ -142,10 +142,16 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         crate::println!("[ irq  ] timer tick #{} (hardware woke the CPU)", tick);
         crate::serial_println!("[ irq  ] timer interrupt fired - tick #{}", tick);
     }
+    // EOI *before* the context switch: if we switch to a brand-new thread it
+    // starts at `thread_start`, not by returning through this handler, so an
+    // EOI left for later would never be sent and the PIC would stop delivering
+    // timer interrupts entirely.
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
+    // Preemption: hand the CPU to the next ready thread, if there is one.
+    crate::scheduler::on_tick();
 }
 
 /// Keyboard interrupt (IRQ1 → vector 33). Fires once per key press AND once per
