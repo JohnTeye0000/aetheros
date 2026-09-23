@@ -207,22 +207,21 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     boot_log!("Stage 6 live. Cooperative multitasking works.");
     boot_log!("");
 
-    // --- Stage 23: preemptive multitasking ------------------------------
-    // Adopt this code as thread 0, then start three worker threads that do
-    // nothing but count in a tight loop. None of them ever yields — from here
-    // on, the timer interrupt alone decides who runs.
+    // --- Stages 23-24: preemptive threads ---------------------------------
+    // Adopt this code as thread 0. From here on the timer interrupt can swap
+    // threads at any moment; the shell's `spawn`/`ps`/`kill` create, list and
+    // remove threads on demand.
     vga_buffer::WRITER
         .lock()
         .set_color(Color::Yellow, Color::Black);
     boot_log!("[ sched ] adopting kernel_main as thread 0");
     scheduler::init();
-    scheduler::spawn_demo_workers();
-    boot_log!("[ sched ] spawned worker-a/b/c - none of them ever yields");
+    boot_log!("[ sched ] scheduler online - try: spawn ticker / spawn spin / ps / kill <id>");
     boot_log!("");
     vga_buffer::WRITER
         .lock()
         .set_color(Color::LightGreen, Color::Black);
-    boot_log!("Stage 23 live. Preemptive scheduling: the timer decides who runs.");
+    boot_log!("Stage 24 live. Preemptive threads with spawn / sleep / kill.");
     boot_log!("");
 
     // --- Stage 7: an interactive shell ----------------------------------

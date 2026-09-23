@@ -16,11 +16,13 @@
 //! `switch_context` from. From each thread's point of view, `switch_context`
 //! is just a function that takes a very long time to return.
 //!
-//! The switch happens **inside the timer interrupt handler**. So a suspended
-//! thread is always parked mid-interrupt, with its interrupt frame still on
-//! its own stack; when it's resumed it finishes the handler and `iretq`s back
-//! to exactly the instruction the timer interrupted. That instruction never
-//! knew it had been paused.
+//! A thread gets suspended in one of two ways, and `switch_context` doesn't
+//! care which:
+//!   * **preempted** — the timer interrupt handler calls `on_tick`, so the
+//!     thread is parked mid-interrupt, and resumes by finishing the handler and
+//!     `iretq`-ing to the instruction the timer interrupted;
+//!   * **voluntarily** — the thread itself calls `sleep_ticks`, which calls
+//!     `switch_context` directly and resumes by simply returning.
 //!
 //! ## Brand-new threads
 //!
@@ -28,6 +30,12 @@
 //! fabricates a stack that *looks like* a suspended thread: six zeroed
 //! callee-saved slots and a return address pointing at `thread_start`, which
 //! enables interrupts and calls the thread's entry function.
+//!
+//! ## Lifecycle
+//!
+//! `Ready`/`Running` threads take turns. `sleep_ticks` parks a thread as
+//! `Sleeping` until a wake-up tick; `kill` marks a thread `Dead`; `reap` frees
+//! the stacks of dead threads (never the one currently executing).
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -46,6 +54,7 @@ const STACK_SIZE: usize = 32 * 1024;
 pub enum State {
     Running,
     Ready,
+    Sleeping,
     Dead,
 }
 
@@ -54,6 +63,7 @@ impl State {
         match self {
             State::Running => "running",
             State::Ready => "ready",
+            State::Sleeping => "sleeping",
             State::Dead => "dead",
         }
     }
@@ -67,6 +77,8 @@ struct Thread {
     saved_rsp: usize,
     /// How many times the scheduler has switched *into* this thread.
     switches_in: u64,
+    /// For `Sleeping` threads: the timer tick at which to wake up.
+    wake_tick: u64,
     /// The thread's stack. `None` for the boot thread, which keeps using the
     /// stack the bootloader gave it.
     _stack: Option<Box<[u8]>>,
@@ -88,6 +100,15 @@ static SCHED: Mutex<Scheduler> = Mutex::new(Scheduler {
     current: 0,
     next_id: 1,
 });
+
+/// A progress counter per thread id (modulo the table size), so demo threads
+/// can show "I'm alive and doing work" without any shared-state plumbing.
+const PROGRESS_SLOTS: usize = 32;
+static PROGRESS: [AtomicU64; PROGRESS_SLOTS] = [const { AtomicU64::new(0) }; PROGRESS_SLOTS];
+
+pub fn progress(id: usize) -> u64 {
+    PROGRESS[id % PROGRESS_SLOTS].load(Ordering::Relaxed)
+}
 
 global_asm!(
     r#"
@@ -138,6 +159,7 @@ pub fn init() {
             state: State::Running,
             saved_rsp: 0,
             switches_in: 0,
+            wake_tick: 0,
             _stack: None,
         }));
         s.current = 0;
@@ -171,23 +193,32 @@ pub fn spawn(name: &str, entry: extern "C" fn(usize), arg: usize) -> usize {
         let mut s = SCHED.lock();
         let id = s.next_id;
         s.next_id += 1;
+        PROGRESS[id % PROGRESS_SLOTS].store(0, Ordering::Relaxed);
         s.threads.push(Box::new(Thread {
             id,
             name: String::from(name),
             state: State::Ready,
             saved_rsp: rsp,
             switches_in: 0,
+            wake_tick: 0,
             _stack: Some(stack),
         }));
         id
     })
 }
 
-/// Called from the timer interrupt handler (interrupts already disabled, EOI
-/// already sent): pick the next ready thread, round-robin, and switch to it.
-pub fn on_tick() {
+/// Pick the next ready thread (round-robin from the current one) and switch to
+/// it. Interrupts must already be disabled. Wakes any sleepers whose time has
+/// come first. If nothing else is ready, returns and the caller keeps running.
+fn schedule() {
+    let now = crate::interrupts::ticks();
     let (old_ptr, new_rsp) = {
         let mut s = SCHED.lock();
+        for t in s.threads.iter_mut() {
+            if t.state == State::Sleeping && t.wake_tick <= now {
+                t.state = State::Ready;
+            }
+        }
         let n = s.threads.len();
         if n < 2 {
             return;
@@ -212,6 +243,39 @@ pub fn on_tick() {
     unsafe { switch_context(old_ptr, new_rsp) };
 }
 
+/// Called from the timer interrupt handler (interrupts already disabled, EOI
+/// already sent): preempt the running thread.
+pub fn on_tick() {
+    schedule();
+}
+
+/// Block the calling thread for `ticks` timer ticks (~55 ms each) and let
+/// other threads run in the meantime. Unlike spinning, a sleeping thread uses
+/// no CPU at all until its wake-up tick.
+pub fn sleep_ticks(ticks: u64) {
+    interrupts::without_interrupts(|| {
+        {
+            let mut s = SCHED.lock();
+            let c = s.current;
+            s.threads[c].state = State::Sleeping;
+            s.threads[c].wake_tick = crate::interrupts::ticks() + ticks;
+        }
+        // We are no longer Running, so `schedule` will pick someone else and we
+        // resume — right here — once a later tick has woken us and the
+        // scheduler rotates back around to us.
+        schedule();
+    });
+    // (`without_interrupts` restores the interrupt flag on the way out.)
+}
+
+/// Id of the thread that is executing right now.
+pub fn current_id() -> usize {
+    interrupts::without_interrupts(|| {
+        let s = SCHED.lock();
+        s.threads[s.current].id
+    })
+}
+
 /// Mark the current thread finished. The scheduler never resumes it again.
 pub fn exit_current() -> ! {
     interrupts::without_interrupts(|| {
@@ -224,14 +288,61 @@ pub fn exit_current() -> ! {
     }
 }
 
+#[derive(Debug)]
+pub enum KillError {
+    NoSuchThread,
+    IsBootThread,
+    AlreadyDead,
+}
+
+/// Terminate a thread by id. The thread is simply never scheduled again; its
+/// stack is reclaimed by `reap` (immediately, unless it is the thread that is
+/// running right now — then at the next reap).
+///
+/// Caveat, stated plainly: killing a thread that holds a lock leaves that
+/// lock held forever. Nothing here takes a lock across a preemption point, so
+/// the demo threads are safe to kill — but this is not a general guarantee.
+pub fn kill(id: usize) -> Result<(), KillError> {
+    if id == 0 {
+        return Err(KillError::IsBootThread);
+    }
+    let result = interrupts::without_interrupts(|| {
+        let mut s = SCHED.lock();
+        match s.threads.iter_mut().find(|t| t.id == id) {
+            None => Err(KillError::NoSuchThread),
+            Some(t) if t.state == State::Dead => Err(KillError::AlreadyDead),
+            Some(t) => {
+                t.state = State::Dead;
+                Ok(())
+            }
+        }
+    });
+    reap();
+    result
+}
+
+/// Free the stacks of dead threads. The thread currently running is never
+/// freed, even if dead — we may be executing on its stack right now.
+pub fn reap() {
+    interrupts::without_interrupts(|| {
+        let mut s = SCHED.lock();
+        let cur_id = s.threads[s.current].id;
+        s.threads.retain(|t| t.state != State::Dead || t.id == cur_id);
+        s.current = s.threads.iter().position(|t| t.id == cur_id).unwrap_or(0);
+    });
+}
+
 pub struct ThreadInfo {
     pub id: usize,
     pub name: String,
     pub state: State,
     pub switches: u64,
+    pub wake_in: u64,
 }
 
 pub fn snapshot() -> Vec<ThreadInfo> {
+    reap();
+    let now = crate::interrupts::ticks();
     interrupts::without_interrupts(|| {
         SCHED
             .lock()
@@ -242,26 +353,39 @@ pub fn snapshot() -> Vec<ThreadInfo> {
                 name: t.name.clone(),
                 state: t.state,
                 switches: t.switches_in,
+                wake_in: if t.state == State::Sleeping {
+                    t.wake_tick.saturating_sub(now)
+                } else {
+                    0
+                },
             })
             .collect()
     })
 }
 
-// --- demo workers -------------------------------------------------------------
+// --- demo thread bodies ---------------------------------------------------------
 
-/// One counter per demo worker. Each worker does nothing but increment its own
-/// counter in a tight loop — it never yields, never sleeps, never calls
-/// anything. If all three counters climb, the only explanation is preemption.
-pub static WORK: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+fn bump_progress() {
+    PROGRESS[current_id() % PROGRESS_SLOTS].fetch_add(1, Ordering::Relaxed);
+}
 
-extern "C" fn worker(idx: usize) {
+/// A CPU hog: counts in a tight loop and never yields.
+pub extern "C" fn spin_entry(_: usize) {
+    let slot = current_id() % PROGRESS_SLOTS;
     loop {
-        WORK[idx].fetch_add(1, Ordering::Relaxed);
+        PROGRESS[slot].fetch_add(1, Ordering::Relaxed);
     }
 }
 
-pub fn spawn_demo_workers() {
-    spawn("worker-a", worker, 0);
-    spawn("worker-b", worker, 1);
-    spawn("worker-c", worker, 2);
+/// A well-behaved background thread: sleeps ~1 second (18 ticks), wakes, logs,
+/// repeats. While it sleeps it costs nothing.
+pub extern "C" fn ticker_entry(_: usize) {
+    let id = current_id();
+    loop {
+        sleep_ticks(18);
+        bump_progress();
+        let n = progress(id);
+        crate::println!("[ticker {}] woke up, beat #{} (tick {})", id, n, crate::interrupts::ticks());
+        crate::serial_println!("[ticker {}] woke up, beat #{} (tick {})", id, n, crate::interrupts::ticks());
+    }
 }
