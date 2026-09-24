@@ -19,7 +19,7 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Paging / virtual memory** — the kernel reads the active page tables (translating any virtual address to its physical frame via the recursive offset map) and **writes its own mappings**: it maps a fresh, unused virtual page onto the VGA frame and prints through it. Plus a bootloader-memory-map frame allocator. The foundation for a heap and, later, separate address spaces.
 - [x] **Kernel heap** — a 512 KiB heap region is mapped and managed by a **free-list allocator written from scratch** (no external crate), registered as Rust's `#[global_allocator]`. `Box`, `Vec`, and `String` work inside the kernel, and individual blocks are reclaimed on free — allocate, free, allocate again at the same size, and it lands at the exact address just freed (`heaptest` proves it). Originally a simpler bump allocator (Stage 5); upgraded here.
 - [x] **Cooperative multitasking** — an async/await `Task` type and a small round-robin executor (with a hand-built `Waker`). Two async tasks that `yield_now().await` after each step interleave on a single CPU — concurrency without threads or preemption.
-- [x] **Interactive shell** — type a command, press Enter, the kernel runs it. The keyboard interrupt feeds a line buffer; commands: `help`, `echo`, `about`, `ticks`, `date`, `mem`, `ps`, `spawn`, `kill`, `heaptest`, `cpuinfo`, `lspci`, `acpi`, `hpet`, `disk`, `clear`, `history`, fault demos `crash`/`pagefault`, and a file set `ls`, `cat`, `write`, `rm`, `cp`, `mv`. **You can drive the OS.**
+- [x] **Interactive shell** — type a command, press Enter, the kernel runs it. The keyboard interrupt feeds a line buffer; commands: `help`, `echo`, `about`, `ticks`, `date`, `mem`, `ps`, `spawn`, `kill`, `save`, `load`, `heaptest`, `cpuinfo`, `lspci`, `acpi`, `hpet`, `disk`, `clear`, `history`, fault demos `crash`/`pagefault`, and a file set `ls`, `cat`, `write`, `rm`, `cp`, `mv`. **You can drive the OS.**
 - [x] **Real-time clock** — reads the battery-backed CMOS RTC over I/O ports (decoding BCD and waiting out the "update in progress" flag); `date` prints the live wall-clock time in UTC.
 - [x] **CPU identification (`cpuid`)** — asks the processor to describe itself: vendor string, brand string, family/model/stepping, and feature flags (SSE, MMX, hypervisor, ...), decoded straight from the `cpuid` instruction. `cpuinfo` prints it — the same mechanism behind `lscpu`.
 - [x] **PCI bus enumeration** — walks PCI configuration space over I/O ports `0xCF8`/`0xCFC` and lists what's attached: vendor/device IDs, class, and a name for recognized devices. `lspci` finds the real virtual hardware QEMU exposes (host bridge, IDE controller, VGA, NIC).
@@ -32,31 +32,24 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Page-fault diagnostics** — a page-fault handler that reports the faulting virtual address (from `CR2`) and decodes the error code (read vs write, present vs protection). The `pagefault` command triggers one on an unmapped address to show it.
 - [x] **Preemptive multitasking** — kernel threads switched by the timer interrupt. A hand-written `switch_context` (15 instructions of assembly) swaps callee-saved registers and stack pointers inside the timer handler; new threads start on a forged stack frame. A thread that never yields (`spawn spin`) still shares the CPU fairly. Required making the heap lock interrupt-safe (see Stage 24 for lifecycle). (Stage 6's cooperative executor is still there.)
 - [x] **Thread lifecycle** — `spawn`, `ps`, `kill`, and a real blocking `sleep`. Sleeping threads cost no CPU and wake on an exact tick (a ticker thread logs every 18 ticks, precisely); `kill` frees the thread's 32 KiB stack back to the heap, never the one currently executing.
+- [x] **Persistent storage** — `save` writes the filesystem to a second ATA disk (checksummed `AFS1` format, blob first / header last); the kernel restores it at boot. Corrupt or foreign disks are rejected without touching memory, and the boot disk has no write path at all.
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
-A `ticker` thread (sleeps 18 ticks, wakes, logs) and a `spin` thread (never yields) share the CPU. `ps` shows the ticker's sleep countdown; `mem` shows each `kill` returning a 32 KiB stack to the heap (66,144 → 33,520 → 704 bytes):
+Stage 25: files written before `save` come back after a reboot (`[ disk ] restored 4 files`). Run with a second drive: `-drive file=data.img,format=raw,if=ide,index=1`.
 
-![boot-stage24.png](docs/boot-stage24.png)
+![boot-stage25.png](docs/boot-stage25.png)
 
 From the serial log:
 
 ```
-aether> ps
-   1  ticker       sleeping(12)        13  12
-   2  spin         running             51  11385556
-[ticker 1] woke up, beat #12 (tick 470)
-[ticker 1] woke up, beat #13 (tick 488)     <- exactly 18 ticks apart
-aether> mem     heap 66144/524288 bytes
-aether> kill 2  killed thread 2
-aether> mem     heap 33520/524288 bytes
-aether> kill 1  killed thread 1
-aether> mem     heap 704/524288 bytes
-aether> kill 0  kill: refusing to kill thread 0 (kernel_main)
+[ disk  ] restored 4 files from the data disk
+aether> cat journal.txt
+day 25 - files survive power off
 ```
 
-Every stage has its own screenshot in `docs/`: [0](docs/boot-stage0.png) · [1](docs/boot-stage1.png) · [2](docs/boot-stage2.png) · [3](docs/boot-stage3.png) · [4](docs/boot-stage4.png) · [5](docs/boot-stage5.png) · [6](docs/boot-stage6.png) · [7](docs/boot-stage7.png) · [8](docs/boot-stage8.png) · [9](docs/boot-stage9.png) · [10](docs/boot-stage10.png) · [11](docs/boot-stage11.png) · [12](docs/boot-stage12.png) · [13](docs/boot-stage13.png) · [14](docs/boot-stage14.png) · [15](docs/boot-stage15.png) · [16](docs/boot-stage16.png) · [17](docs/boot-stage17.png) · [18](docs/boot-stage18.png) · [19](docs/boot-stage19.png) · [20](docs/boot-stage20.png) · [21](docs/boot-stage21.png) · [22](docs/boot-stage22.png) · [23](docs/boot-stage23.png) · [24](docs/boot-stage24.png)
+Every stage has its own screenshot in `docs/`: [0](docs/boot-stage0.png) · [1](docs/boot-stage1.png) · [2](docs/boot-stage2.png) · [3](docs/boot-stage3.png) · [4](docs/boot-stage4.png) · [5](docs/boot-stage5.png) · [6](docs/boot-stage6.png) · [7](docs/boot-stage7.png) · [8](docs/boot-stage8.png) · [9](docs/boot-stage9.png) · [10](docs/boot-stage10.png) · [11](docs/boot-stage11.png) · [12](docs/boot-stage12.png) · [13](docs/boot-stage13.png) · [14](docs/boot-stage14.png) · [15](docs/boot-stage15.png) · [16](docs/boot-stage16.png) · [17](docs/boot-stage17.png) · [18](docs/boot-stage18.png) · [19](docs/boot-stage19.png) · [20](docs/boot-stage20.png) · [21](docs/boot-stage21.png) · [22](docs/boot-stage22.png) · [23](docs/boot-stage23.png) · [24](docs/boot-stage24.png) · [25](docs/boot-stage25.png)
 
 ## The build arc (the roadmap)
 
@@ -83,7 +76,7 @@ Each item is a real, independently-committable capability — built in order, ro
 - [x] Upgraded the heap to a free-list allocator — individual blocks reclaimed, not just bump-and-reset (`heaptest`)
 - [x] Preemptive multitasking — timer-driven context switching between kernel threads (`threads`)
 - [x] Thread lifecycle — spawn / sleep / kill / stack reclamation (`ps`, `spawn`, `kill`)
-- [ ] A disk-backed (not in-memory) filesystem
+- [x] Persistent storage — ATA write path, AFS1 on-disk format, `save` / `load` (files survive reboot)
 
 ## How it boots
 
@@ -124,6 +117,7 @@ src/task/          async Task type + cooperative round-robin executor
 src/shell.rs       interactive command shell (line buffer + commands)
 src/fs.rs          in-memory read-write filesystem (ramdisk)
 src/scheduler.rs   preemptive kernel threads: context switch, spawn, round-robin
+src/persist.rs     saving / restoring the filesystem on the data disk (AFS1 format)
 .cargo/config.toml build-std + target + bootimage runner config
 docs/              boot screenshots + devlog/ (plain-English notes per milestone)
 ```
