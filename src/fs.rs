@@ -78,6 +78,25 @@ pub fn write(name: &str, contents: &str) {
     }
 }
 
+/// Copy out every file as `(name, contents)` — used by the persistence layer.
+pub fn export() -> Vec<(String, String)> {
+    FILES
+        .lock()
+        .iter()
+        .map(|f| (f.name.clone(), f.contents.clone()))
+        .collect()
+}
+
+/// Replace the entire filesystem with the given files (used after a validated
+/// load from disk).
+pub fn replace_all(new_files: Vec<(String, String)>) {
+    let mut files = FILES.lock();
+    files.clear();
+    for (name, contents) in new_files {
+        files.push(File { name, contents });
+    }
+}
+
 /// Delete a file. Returns `true` if it existed.
 pub fn remove(name: &str) -> bool {
     let mut files = FILES.lock();

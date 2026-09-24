@@ -27,6 +27,7 @@ mod hpet;
 mod interrupts;
 mod memory;
 mod pci;
+mod persist;
 mod rtc;
 mod scheduler;
 mod serial;
@@ -223,6 +224,15 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         .set_color(Color::LightGreen, Color::Black);
     boot_log!("Stage 24 live. Preemptive threads with spawn / sleep / kill.");
     boot_log!("");
+
+    // --- Stage 25: restore saved files from the data disk -----------------
+    match persist::data_disk_sectors() {
+        None => boot_log!("[ disk  ] no data disk attached - files are RAM-only this boot"),
+        Some(_) => match persist::load() {
+            Ok(n) => boot_log!("[ disk  ] restored {} files from the data disk", n),
+            Err(e) => boot_log!("[ disk  ] data disk present, nothing restored: {}", e),
+        },
+    }
 
     // --- Stage 7: an interactive shell ----------------------------------
     // Hand the keyboard over to a command shell. From here the kernel is

@@ -140,7 +140,7 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  date  mem  ps  spawn  kill  heaptest  cpuinfo  lspci  acpi  hpet  disk  clear  history  crash  pagefault");
+            out("  help  echo  about  ticks  date  mem  ps  spawn  kill  save  load  heaptest  cpuinfo  lspci  acpi  hpet  disk  clear  history  crash  pagefault");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
@@ -420,7 +420,27 @@ fn dispatch(input: &str) {
                 None => out("no HPET found (table missing, or not signed \"HPET\")"),
             }
         }
-        "disk" => match crate::ata::identify_primary_master() {
+        "save" => match crate::persist::save() {
+            Ok((files, sectors)) => {
+                let line = alloc::format!("saved {} files ({} sectors) to the data disk", files, sectors);
+                out(&line);
+            }
+            Err(e) => {
+                let line = alloc::format!("save failed: {}", e);
+                out(&line);
+            }
+        },
+        "load" => match crate::persist::load() {
+            Ok(n) => {
+                let line = alloc::format!("loaded {} files from the data disk", n);
+                out(&line);
+            }
+            Err(e) => {
+                let line = alloc::format!("load failed: {}", e);
+                out(&line);
+            }
+        },
+        "disk" => match crate::ata::identify(crate::ata::Drive::Master) {
             Some(id) => {
                 let model = core::str::from_utf8(&id.model).unwrap_or("?").trim();
                 let bytes = id.sectors_28bit as u64 * 512;
@@ -447,7 +467,7 @@ fn dispatch(input: &str) {
                 // Read sector 0 for real (READ SECTORS, no writes anywhere in
                 // this driver) and check the boot signature every MBR-style
                 // sector ends with — proof the bytes we got back are genuine.
-                match crate::ata::read_sector(0) {
+                match crate::ata::read_sector(crate::ata::Drive::Master, 0) {
                     Some(sector) => {
                         let sig_ok = sector[510] == 0x55 && sector[511] == 0xAA;
                         let line3 = alloc::format!(
