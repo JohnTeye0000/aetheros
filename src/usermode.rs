@@ -83,6 +83,7 @@ global_asm!(
         push r15
         mov  [rdx], rsp          // where `exit` will come back to
         mov  [r9], rsp           // ring 3 -> ring 0 interrupts land just below this
+        mov  [rip + fast_kernel_rsp], rsp   // ...and so does the SYSCALL path
         push r8                  // SS
         push rsi                 // RSP
         push 0x202               // RFLAGS: IF set (timer keeps preempting), IOPL 0
@@ -148,6 +149,52 @@ global_asm!(
         pop  rdx
         pop  rcx
         iretq                    // rax = return value
+
+    // ---- SYSCALL fast path -------------------------------------------------
+    // `syscall` (unlike int 0x80) does NOT switch stacks or push a frame: the
+    // CPU just puts the return RIP in rcx, RFLAGS in r11, clears the flags in
+    // SFMASK (IF), loads CS/SS from STAR, and jumps to LSTAR. Everything else
+    // is on us -- notably we are still on the USER stack, so the first job is
+    // to get onto the kernel stack.
+    .data
+    .balign 8
+    fast_kernel_rsp: .quad 0
+    fast_scratch:    .quad 0
+    .text
+
+    .global syscall_fast_entry
+    syscall_fast_entry:
+        mov  [rip + fast_scratch], rsp      // interrupts are off: nothing can intervene
+        mov  rsp, [rip + fast_kernel_rsp]
+        and  rsp, -16
+        push qword ptr [rip + fast_scratch]         // user rsp
+        push rcx                            // user rip
+        push r11                            // user rflags
+        push rdx
+        push rsi
+        push rdi
+        push r8
+        push r9
+        push r10
+        mov  rcx, rdx
+        mov  rdx, rsi
+        mov  rsi, rdi
+        mov  r8, r10
+        mov  rdi, rax
+        sub  rsp, 8                         // 9 pushes -> re-align for the call
+        cld
+        call syscall_dispatch
+        add  rsp, 8
+        pop  r10
+        pop  r9
+        pop  r8
+        pop  rdi
+        pop  rsi
+        pop  rdx
+        pop  r11                            // rflags -> restored by sysret
+        pop  rcx                            // rip    -> restored by sysret
+        pop  rsp                            // back onto the user stack
+        sysretq
 
     // ---- built-in user programs (position independent, ring 3) ----------
 
@@ -405,6 +452,67 @@ global_asm!(
     .equ un_msg_len, un_msg_end - un_msg
     user_note_end:
 
+    .global user_fast_start
+    .global user_fast_end
+    user_fast_start:
+        mov  eax, 1
+        lea  rdi, [rip + uf_msg]
+        mov  esi, offset uf_msg_len
+        syscall
+        mov  eax, 4
+        mov  edi, 2
+        syscall
+        mov  eax, 3                      // getpid via syscall
+        syscall
+        mov  edi, eax
+        mov  eax, 0
+        syscall
+    uf_msg:
+        .ascii "hello via the SYSCALL instruction (no interrupt gate, no frame push)\n"
+    uf_msg_end:
+    .equ uf_msg_len, uf_msg_end - uf_msg
+    user_fast_end:
+
+    .global user_bint_start
+    .global user_bint_end
+    user_bint_start:
+        mov  eax, 2
+        int  0x80
+        mov  r13, rax
+        mov  r12d, 200000
+    ubi_loop:
+        mov  eax, 3
+        int  0x80
+        dec  r12d
+        jnz  ubi_loop
+        mov  eax, 2
+        int  0x80
+        sub  rax, r13
+        mov  rdi, rax
+        mov  eax, 0
+        int  0x80
+    user_bint_end:
+
+    .global user_bsys_start
+    .global user_bsys_end
+    user_bsys_start:
+        mov  eax, 2
+        int  0x80
+        mov  r13, rax
+        mov  r12d, 200000
+    ubs_loop:
+        mov  eax, 3
+        syscall
+        dec  r12d
+        jnz  ubs_loop
+        mov  eax, 2
+        int  0x80
+        sub  rax, r13
+        mov  rdi, rax
+        mov  eax, 0
+        int  0x80
+    user_bsys_end:
+
     .text
     "#
 );
@@ -420,11 +528,36 @@ extern "C" {
     ) -> u64;
     fn kernel_resume(saved_rsp: u64, status: u64) -> !;
     fn syscall_entry();
+    fn syscall_fast_entry();
 }
 
 /// Address of the `int 0x80` entry stub, for the IDT.
 pub fn syscall_entry_addr() -> u64 {
     syscall_entry as *const () as usize as u64
+}
+
+/// Enable and configure the SYSCALL/SYSRET instructions.
+///
+/// * EFER.SCE turns the instructions on.
+/// * STAR[47:32] = kernel CS (SS = that + 8); STAR[63:48] = base for SYSRET,
+///   which loads SS = base + 8 and CS = base + 16 (RPL forced to 3). Our GDT
+///   is laid out to make those arithmetic rules come out right.
+/// * LSTAR = where `syscall` jumps. SFMASK = RFLAGS bits to clear on entry
+///   (IF, so no interrupt can arrive while we're still on the user stack; DF).
+fn init_syscall_msrs() {
+    use x86_64::registers::model_specific::Msr;
+    let (kcs, _kds) = crate::gdt::kernel_selectors();
+    let (ucs, _uss) = crate::gdt::user_selectors();
+    // ucs = base + 16 (with RPL 3 bits), so base = ucs - 16 - 3.
+    let sysret_base = (ucs as u64 & !3) - 16;
+    unsafe {
+        let mut efer = Msr::new(0xC000_0080);
+        let v = efer.read();
+        efer.write(v | 1); // SCE
+        Msr::new(0xC000_0081).write((sysret_base << 48) | ((kcs as u64) << 32));
+        Msr::new(0xC000_0082).write(syscall_fast_entry as *const () as usize as u64);
+        Msr::new(0xC000_0084).write(0x200 | 0x400);
+    }
 }
 
 // --- the built-in programs -------------------------------------------------
@@ -454,6 +587,9 @@ pub const PROGRAMS: &[(&str, &str)] = &[
     ("cat", "read the file named in argv via readfile, print it"),
     ("keys", "read keystrokes through the readkey syscall"),
     ("note", "create made.txt from ring 3 via writefile"),
+    ("fast", "greet, sleep, getpid and exit via the SYSCALL instruction"),
+    ("bint", "200k getpid calls via int 0x80; exit status = ticks taken"),
+    ("bsys", "200k getpid calls via SYSCALL; exit status = ticks taken"),
 ];
 
 pub fn builtin(name: &str) -> Option<&'static [u8]> {
@@ -467,6 +603,9 @@ pub fn builtin(name: &str) -> Option<&'static [u8]> {
         "cat" => blob!(user_cat_start, user_cat_end),
         "keys" => blob!(user_keys_start, user_keys_end),
         "note" => blob!(user_note_start, user_note_end),
+        "fast" => blob!(user_fast_start, user_fast_end),
+        "bint" => blob!(user_bint_start, user_bint_end),
+        "bsys" => blob!(user_bsys_start, user_bsys_end),
         _ => return None,
     })
 }
@@ -580,6 +719,7 @@ pub fn run(code: &[u8]) -> Result<Exit, &'static str> {
         return Err("program too large (max 16 KiB)");
     }
     let (base, code_frames, stack_frames) = ensure_space()?;
+    init_syscall_msrs();
 
     for f in code_frames.iter().chain(stack_frames.iter()) {
         frame_bytes(*f).fill(0);

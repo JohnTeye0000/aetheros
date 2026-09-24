@@ -36,24 +36,25 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **User mode + system calls** — ring 3 programs via `iretq`, a DPL-3 `int 0x80` gate, TSS `rsp0` kernel stack, user-only page mappings. Syscalls (`exit`/`write`/`ticks`/`getpid`/`sleep`) validate every user pointer; faulting programs (`hlt`, kernel writes) are killed without hurting the kernel, and the timer still preempts ring 3.
 - [x] **Program loader** — programs are files in the filesystem (`AXE1` hex-text format, validated before running); `install` writes the built-ins out, `exec <file>` loads one into ring 3. Saved to the data disk, they survive reboot — including a 12-byte program typed by hand at the shell that exits with status 7.
 - [x] **File, argument and keyboard syscalls** — ring-3 programs can `readfile`/`writefile`, receive arguments, and block on `readkey`. Kernel buffers are validated per direction (kernel-writes only into the program's stack); keys are routed to a program only while it is waiting for input.
+- [x] **SYSCALL/SYSRET fast path** — EFER/STAR/LSTAR/SFMASK configured, GDT reordered to satisfy SYSRET's selector arithmetic, hand-written entry stub that swaps to the kernel stack. Both `int 0x80` and `syscall` reach the same dispatcher.
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
-Stage 28: `run cat motd` reads a file from ring 3, `run note` creates one, `run keys` reads typed keys through a syscall.
+Stage 29: `run fast` talks to the kernel with the SYSCALL instruction; `bint`/`bsys` compare 200k calls each way.
 
-![boot-stage28.png](docs/boot-stage28.png)
+![boot-stage29.png](docs/boot-stage29.png)
 
 From the serial log:
 
 ```
-aether> run keys
-[user] pid 5 'keys' -> ring 3 (143 bytes)
-typing into a ring-3 program (Enter to finish): hello
-[user] pid 5 exited with status 5
+[user] pid 1 'fast' -> ring 3 (116 bytes)
+hello via the SYSCALL instruction (no interrupt gate, no frame push)
+[user] pid 2 'bint' exited with status 96
+[user] pid 3 'bsys' exited with status 88
 ```
 
-Every stage has its own screenshot in `docs/`: [0](docs/boot-stage0.png) · [1](docs/boot-stage1.png) · [2](docs/boot-stage2.png) · [3](docs/boot-stage3.png) · [4](docs/boot-stage4.png) · [5](docs/boot-stage5.png) · [6](docs/boot-stage6.png) · [7](docs/boot-stage7.png) · [8](docs/boot-stage8.png) · [9](docs/boot-stage9.png) · [10](docs/boot-stage10.png) · [11](docs/boot-stage11.png) · [12](docs/boot-stage12.png) · [13](docs/boot-stage13.png) · [14](docs/boot-stage14.png) · [15](docs/boot-stage15.png) · [16](docs/boot-stage16.png) · [17](docs/boot-stage17.png) · [18](docs/boot-stage18.png) · [19](docs/boot-stage19.png) · [20](docs/boot-stage20.png) · [21](docs/boot-stage21.png) · [22](docs/boot-stage22.png) · [23](docs/boot-stage23.png) · [24](docs/boot-stage24.png) · [25](docs/boot-stage25.png) · [26](docs/boot-stage26.png) · [27](docs/boot-stage27.png) · [28](docs/boot-stage28.png)
+Every stage has its own screenshot in `docs/`: [0](docs/boot-stage0.png) · [1](docs/boot-stage1.png) · [2](docs/boot-stage2.png) · [3](docs/boot-stage3.png) · [4](docs/boot-stage4.png) · [5](docs/boot-stage5.png) · [6](docs/boot-stage6.png) · [7](docs/boot-stage7.png) · [8](docs/boot-stage8.png) · [9](docs/boot-stage9.png) · [10](docs/boot-stage10.png) · [11](docs/boot-stage11.png) · [12](docs/boot-stage12.png) · [13](docs/boot-stage13.png) · [14](docs/boot-stage14.png) · [15](docs/boot-stage15.png) · [16](docs/boot-stage16.png) · [17](docs/boot-stage17.png) · [18](docs/boot-stage18.png) · [19](docs/boot-stage19.png) · [20](docs/boot-stage20.png) · [21](docs/boot-stage21.png) · [22](docs/boot-stage22.png) · [23](docs/boot-stage23.png) · [24](docs/boot-stage24.png) · [25](docs/boot-stage25.png) · [26](docs/boot-stage26.png) · [27](docs/boot-stage27.png) · [28](docs/boot-stage28.png) · [29](docs/boot-stage29.png)
 
 ## The build arc (the roadmap)
 

@@ -33,6 +33,7 @@ static mut DF_STACK: [u8; DF_STACK_SIZE] = [0; DF_STACK_SIZE];
 /// The segment selectors we need after loading the GDT.
 struct Selectors {
     code_selector: SegmentSelector,
+    data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
     user_code: SegmentSelector,
     user_data: SegmentSelector,
@@ -41,14 +42,17 @@ struct Selectors {
 lazy_static! {
     static ref GDT: (GlobalDescriptorTable, Selectors) = {
         let mut gdt = GlobalDescriptorTable::new();
+        // Order matters for SYSCALL/SYSRET, which derive selectors from one
+        // base value: kernel code (0x08), kernel data (0x10), then user data
+        // (0x18) and user code (0x20) -- SYSRET wants data at base+8, code at base+16.
         let code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
+        let data_selector = gdt.add_entry(Descriptor::kernel_data_segment());
+        let user_data = gdt.add_entry(Descriptor::user_data_segment());
+        let user_code = gdt.add_entry(Descriptor::user_code_segment());
         // SAFETY: TSS lives for the whole run; the CPU only reads it.
         let tss_selector =
             gdt.add_entry(Descriptor::tss_segment(unsafe { &*core::ptr::addr_of!(TSS) }));
-        // Ring 3 segments (DPL 3). The returned selectors carry RPL 3 already.
-        let user_data = gdt.add_entry(Descriptor::user_data_segment());
-        let user_code = gdt.add_entry(Descriptor::user_code_segment());
-        (gdt, Selectors { code_selector, tss_selector, user_code, user_data })
+        (gdt, Selectors { code_selector, data_selector, tss_selector, user_code, user_data })
     };
 }
 
@@ -80,4 +84,9 @@ pub fn user_selectors() -> (u16, u16) {
 /// interrupt or exception arrives while running ring 3 code.
 pub fn rsp0_slot() -> *mut u64 {
     unsafe { core::ptr::addr_of_mut!((*core::ptr::addr_of_mut!(TSS)).privilege_stack_table[0]) as *mut u64 }
+}
+
+/// `(kernel code, kernel data)` selectors, for the STAR MSR.
+pub fn kernel_selectors() -> (u16, u16) {
+    (GDT.1.code_selector.0, GDT.1.data_selector.0)
 }
