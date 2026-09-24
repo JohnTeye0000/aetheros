@@ -268,6 +268,17 @@ pub fn sleep_ticks(ticks: u64) {
     // (`without_interrupts` restores the interrupt flag on the way out.)
 }
 
+/// Is there a live (not dead) thread with this id?
+pub fn is_alive(id: usize) -> bool {
+    interrupts::without_interrupts(|| {
+        SCHED
+            .lock()
+            .threads
+            .iter()
+            .any(|t| t.id == id && t.state != State::Dead)
+    })
+}
+
 /// Id of the thread that is executing right now.
 pub fn current_id() -> usize {
     interrupts::without_interrupts(|| {

@@ -21,34 +21,34 @@ use x86_64::VirtAddr;
 /// Which IST slot we dedicate to the double-fault handler.
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
-lazy_static! {
-    /// The TSS, holding one dedicated stack for the double-fault handler.
-    static ref TSS: TaskStateSegment = {
-        let mut tss = TaskStateSegment::new();
-        tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
-            const STACK_SIZE: usize = 4096 * 5; // 20 KiB is plenty for a handler
-            static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+/// The TSS. `static mut` (rather than a lazily-built immutable) because the
+/// kernel stack pointer used for ring 3 -> ring 0 transitions (`rsp0`) is
+/// rewritten each time a user program starts; the CPU reads it from memory on
+/// every such transition.
+static mut TSS: TaskStateSegment = TaskStateSegment::new();
 
-            // Stacks grow downward, so the CPU wants the *top* address.
-            let stack_start = VirtAddr::from_ptr(core::ptr::addr_of!(STACK));
-            stack_start + STACK_SIZE as u64
-        };
-        tss
-    };
-}
+const DF_STACK_SIZE: usize = 4096 * 5; // 20 KiB is plenty for a handler
+static mut DF_STACK: [u8; DF_STACK_SIZE] = [0; DF_STACK_SIZE];
 
 /// The segment selectors we need after loading the GDT.
 struct Selectors {
     code_selector: SegmentSelector,
     tss_selector: SegmentSelector,
+    user_code: SegmentSelector,
+    user_data: SegmentSelector,
 }
 
 lazy_static! {
     static ref GDT: (GlobalDescriptorTable, Selectors) = {
         let mut gdt = GlobalDescriptorTable::new();
         let code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
-        let tss_selector = gdt.add_entry(Descriptor::tss_segment(&TSS));
-        (gdt, Selectors { code_selector, tss_selector })
+        // SAFETY: TSS lives for the whole run; the CPU only reads it.
+        let tss_selector =
+            gdt.add_entry(Descriptor::tss_segment(unsafe { &*core::ptr::addr_of!(TSS) }));
+        // Ring 3 segments (DPL 3). The returned selectors carry RPL 3 already.
+        let user_data = gdt.add_entry(Descriptor::user_data_segment());
+        let user_code = gdt.add_entry(Descriptor::user_code_segment());
+        (gdt, Selectors { code_selector, tss_selector, user_code, user_data })
     };
 }
 
@@ -58,9 +58,26 @@ pub fn init() {
     use x86_64::instructions::segmentation::{Segment, CS};
     use x86_64::instructions::tables::load_tss;
 
+    unsafe {
+        // Stacks grow downward, so the CPU wants the *top* address.
+        let top = VirtAddr::from_ptr(core::ptr::addr_of!(DF_STACK)) + DF_STACK_SIZE as u64;
+        (*core::ptr::addr_of_mut!(TSS)).interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] =
+            top;
+    }
     GDT.0.load();
     unsafe {
         CS::set_reg(GDT.1.code_selector);
         load_tss(GDT.1.tss_selector);
     }
+}
+
+/// `(code, data)` selectors for ring 3 (RPL bits included: 0x2b / 0x23-style).
+pub fn user_selectors() -> (u16, u16) {
+    (GDT.1.user_code.0, GDT.1.user_data.0)
+}
+
+/// Address of the TSS `rsp0` field: the stack the CPU switches to when an
+/// interrupt or exception arrives while running ring 3 code.
+pub fn rsp0_slot() -> *mut u64 {
+    unsafe { core::ptr::addr_of_mut!((*core::ptr::addr_of_mut!(TSS)).privilege_stack_table[0]) as *mut u64 }
 }

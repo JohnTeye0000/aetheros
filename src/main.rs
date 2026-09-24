@@ -33,6 +33,7 @@ mod scheduler;
 mod serial;
 mod shell;
 mod task;
+mod usermode;
 mod vga_buffer;
 use vga_buffer::Color;
 
@@ -183,6 +184,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         .set_color(Color::LightGreen, Color::Black);
     boot_log!("Stage 5 live. Heap online - Box/Vec/String work.");
     boot_log!("");
+
+    // Park the mapper + frame allocator globally: later stages (user mode) need
+    // to create mappings from inside threads.
+    memory::install(mapper, frame_allocator);
 
     // --- Stage 6: cooperative multitasking (async/await) ----------------
     // Spawn two async tasks on a tiny round-robin executor. Each yields after

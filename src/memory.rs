@@ -142,3 +142,25 @@ static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
 pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
     VirtAddr::new(PHYS_MEM_OFFSET.load(Ordering::Relaxed) + phys.as_u64())
 }
+
+/// The kernel's page-table mapper and frame allocator, parked here after boot
+/// so threads (e.g. the user-program launcher) can create mappings later on.
+static KERNEL_MEM: spin::Mutex<Option<(OffsetPageTable<'static>, BootInfoFrameAllocator)>> =
+    spin::Mutex::new(None);
+
+/// Hand the mapper + frame allocator over to the global slot (call once, after
+/// the heap is up).
+pub fn install(mapper: OffsetPageTable<'static>, frames: BootInfoFrameAllocator) {
+    *KERNEL_MEM.lock() = Some((mapper, frames));
+}
+
+/// Run `f` with exclusive access to the mapper and frame allocator. Interrupts
+/// are held off for the duration so a preemption can't deadlock on the lock.
+pub fn with_mem<R>(
+    f: impl FnOnce(&mut OffsetPageTable<'static>, &mut BootInfoFrameAllocator) -> R,
+) -> Option<R> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut guard = KERNEL_MEM.lock();
+        guard.as_mut().map(|(m, fa)| f(m, fa))
+    })
+}

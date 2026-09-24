@@ -140,7 +140,7 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  date  mem  ps  spawn  kill  save  load  heaptest  cpuinfo  lspci  acpi  hpet  disk  clear  history  crash  pagefault");
+            out("  help  echo  about  ticks  date  mem  ps  spawn  kill  run  save  load  heaptest  cpuinfo  lspci  acpi  hpet  disk  clear  history  crash  pagefault");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
@@ -418,6 +418,27 @@ fn dispatch(input: &str) {
                     }
                 }
                 None => out("no HPET found (table missing, or not signed \"HPET\")"),
+            }
+        }
+        "run" => {
+            let arg = args.trim();
+            if arg.is_empty() {
+                out("usage: run <program>   programs (they run in ring 3):");
+                for (name, desc) in crate::usermode::PROGRAMS {
+                    let line = alloc::format!("  {:<7} {}", name, desc);
+                    out(&line);
+                }
+            } else {
+                match crate::usermode::spawn_builtin(arg) {
+                    Ok(id) => {
+                        let line = alloc::format!("started '{}' as thread {} (user mode)", arg, id);
+                        out(&line);
+                    }
+                    Err(e) => {
+                        let line = alloc::format!("run: {}", e);
+                        out(&line);
+                    }
+                }
             }
         }
         "save" => match crate::persist::save() {

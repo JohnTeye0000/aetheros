@@ -76,6 +76,18 @@ lazy_static! {
         // dying silently (an unhandled page fault would escalate to a double
         // fault).
         idt.page_fault.set_handler_fn(page_fault_handler);
+        // Faults a user program can trigger. From ring 3 they kill just that
+        // program; from ring 0 they are kernel bugs and panic.
+        idt.divide_error.set_handler_fn(divide_error_handler);
+        idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
+        idt.general_protection_fault.set_handler_fn(general_protection_handler);
+        // Vector 0x80: the system-call gate. DPL 3 is what lets ring 3 code
+        // execute `int 0x80` at all (other vectors raise #GP for user code).
+        unsafe {
+            idt[0x80]
+                .set_handler_addr(x86_64::VirtAddr::new(crate::usermode::syscall_entry_addr()))
+                .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
+        }
         // Vector 32: the timer IRQ (IRQ0), now that the PIC is remapped there.
         idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         // Vector 33: the keyboard IRQ (IRQ1).
@@ -239,6 +251,16 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     use x86_64::registers::control::Cr2;
 
+    // Came from ring 3? Then it's the program's fault, not the kernel's: kill
+    // the program and carry on.
+    if stack_frame.code_segment & 3 == 3 {
+        crate::usermode::user_fault(
+            1,
+            Cr2::read().as_u64(),
+            stack_frame.instruction_pointer.as_u64(),
+        );
+    }
+
     crate::vga_buffer::WRITER
         .lock()
         .set_color(crate::vga_buffer::Color::White, crate::vga_buffer::Color::Red);
@@ -256,4 +278,36 @@ extern "x86-interrupt" fn page_fault_handler(
     loop {
         x86_64::instructions::hlt();
     }
+}
+
+/// True if the exception was raised while running user (ring 3) code.
+fn from_user(frame: &InterruptStackFrame) -> bool {
+    frame.code_segment & 3 == 3
+}
+
+extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
+    if from_user(&stack_frame) {
+        crate::usermode::user_fault(4, 0, stack_frame.instruction_pointer.as_u64());
+    }
+    panic!("EXCEPTION: DIVIDE ERROR
+{:#?}", stack_frame);
+}
+
+extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    if from_user(&stack_frame) {
+        crate::usermode::user_fault(3, 0, stack_frame.instruction_pointer.as_u64());
+    }
+    panic!("EXCEPTION: INVALID OPCODE
+{:#?}", stack_frame);
+}
+
+extern "x86-interrupt" fn general_protection_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    if from_user(&stack_frame) {
+        crate::usermode::user_fault(2, error_code, stack_frame.instruction_pointer.as_u64());
+    }
+    panic!("EXCEPTION: GENERAL PROTECTION FAULT (error {:#x})
+{:#?}", error_code, stack_frame);
 }
