@@ -513,6 +513,43 @@ global_asm!(
         int  0x80
     user_bsys_end:
 
+    .global user_nx_start
+    .global user_nx_end
+    user_nx_start:
+        mov  eax, 1
+        lea  rdi, [rip + unx_msg]
+        mov  esi, offset unx_msg_len
+        int  0x80
+        sub  rsp, 16
+        mov  byte ptr [rsp], 0xc3        // a `ret` instruction, as DATA on the stack
+        jmp  rsp                         // ...now try to EXECUTE the stack
+        mov  eax, 0
+        xor  edi, edi
+        int  0x80
+    unx_msg:
+        .ascii "writing code onto my stack and jumping to it (NX should stop me)...\n"
+    unx_msg_end:
+    .equ unx_msg_len, unx_msg_end - unx_msg
+    user_nx_end:
+
+    .global user_selfmod_start
+    .global user_selfmod_end
+    user_selfmod_start:
+        mov  eax, 1
+        lea  rdi, [rip + usm_msg]
+        mov  esi, offset usm_msg_len
+        int  0x80
+        lea  rax, [rip + user_selfmod_start]
+        mov  byte ptr [rax], 0x90        // overwrite my own code
+        mov  eax, 0
+        xor  edi, edi
+        int  0x80
+    usm_msg:
+        .ascii "trying to overwrite my own code page (it is read-only)...\n"
+    usm_msg_end:
+    .equ usm_msg_len, usm_msg_end - usm_msg
+    user_selfmod_end:
+
     .text
     "#
 );
@@ -534,6 +571,43 @@ extern "C" {
 /// Address of the `int 0x80` entry stub, for the IDT.
 pub fn syscall_entry_addr() -> u64 {
     syscall_entry as *const () as usize as u64
+}
+
+/// Turn on the CPU's memory-protection features, and report what we got.
+///
+/// * **NX** (EFER.NXE): pages can be marked no-execute, so data (the user
+///   stack) can't be run as code -- classic stack-smashing shellcode dies here.
+/// * **SMEP** (CR4.SMEP): the kernel faults if it ever *executes* a user page,
+///   so a kernel bug can't be steered into running user-supplied code.
+/// * **SMAP** (CR4.SMAP): the kernel faults if it *reads/writes* user pages
+///   without an explicit `stac`, so a kernel bug can't be tricked into
+///   dereferencing a user pointer unchecked.
+///
+/// SMEP/SMAP are only present on newer CPUs (cpuid leaf 7), so they're enabled
+/// only if reported. Returns (nx, smep, smap).
+pub fn harden() -> (bool, bool, bool) {
+    use core::arch::x86_64::__cpuid_count;
+    use x86_64::registers::control::{Cr4, Cr4Flags};
+    use x86_64::registers::model_specific::Msr;
+
+    let mut efer = Msr::new(0xC000_0080);
+    unsafe { efer.write(efer.read() | (1 << 11)) };
+
+    let leaf7 = unsafe { __cpuid_count(7, 0) };
+    let smep = leaf7.ebx & (1 << 7) != 0;
+    let smap = leaf7.ebx & (1 << 20) != 0;
+    unsafe {
+        Cr4::update(|f| {
+            if smep {
+                f.insert(Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION);
+            }
+            if smap {
+                f.insert(Cr4Flags::SUPERVISOR_MODE_ACCESS_PREVENTION);
+            }
+        });
+    }
+    SMAP_ON.store(smap, Ordering::SeqCst);
+    (true, smep, smap)
 }
 
 /// Enable and configure the SYSCALL/SYSRET instructions.
@@ -588,6 +662,8 @@ pub const PROGRAMS: &[(&str, &str)] = &[
     ("keys", "read keystrokes through the readkey syscall"),
     ("note", "create made.txt from ring 3 via writefile"),
     ("fast", "greet, sleep, getpid and exit via the SYSCALL instruction"),
+    ("nx", "execute code from the stack -> NX page fault -> killed"),
+    ("selfmod", "overwrite own code page -> W^X page fault -> killed"),
     ("bint", "200k getpid calls via int 0x80; exit status = ticks taken"),
     ("bsys", "200k getpid calls via SYSCALL; exit status = ticks taken"),
 ];
@@ -604,6 +680,8 @@ pub fn builtin(name: &str) -> Option<&'static [u8]> {
         "keys" => blob!(user_keys_start, user_keys_end),
         "note" => blob!(user_note_start, user_note_end),
         "fast" => blob!(user_fast_start, user_fast_end),
+        "nx" => blob!(user_nx_start, user_nx_end),
+        "selfmod" => blob!(user_selfmod_start, user_selfmod_end),
         "bint" => blob!(user_bint_start, user_bint_end),
         "bsys" => blob!(user_bsys_start, user_bsys_end),
         _ => return None,
@@ -656,10 +734,13 @@ fn ensure_space() -> Result<(u64, [PhysFrame; CODE_PAGES], [PhysFrame; STACK_PAG
         for (i, slot) in code.iter_mut().enumerate() {
             *slot = map_page(base + (i as u64) * 4096, leaf)?;
         }
-        // Stack: user-readable and writable.
+        // Stack: user-readable and writable, but NEVER executable (W^X).
         let mut stack = [PhysFrame::containing_address(PhysAddr::new(0)); STACK_PAGES];
         for (i, slot) in stack.iter_mut().enumerate() {
-            *slot = map_page(base + STACK_OFFSET + (i as u64) * 4096, leaf | PageTableFlags::WRITABLE)?;
+            *slot = map_page(
+                base + STACK_OFFSET + (i as u64) * 4096,
+                leaf | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
+            )?;
         }
         Ok(UserSpace { base, code, stack })
     });
@@ -711,12 +792,22 @@ pub enum Exit {
     Fault(&'static str, u64, u64),
 }
 
+fn on_off(b: bool) -> &'static str {
+    if b { "on" } else { "unsupported" }
+}
+
 /// Copy `code` into the user address space and run it to completion in ring 3.
 /// Must be called from a kernel thread (it borrows that thread's stack for
 /// ring 3 -> ring 0 transitions).
 pub fn run(code: &[u8]) -> Result<Exit, &'static str> {
     if code.len() > CODE_BYTES as usize {
         return Err("program too large (max 16 KiB)");
+    }
+    static HARDENED: AtomicBool = AtomicBool::new(false);
+    if !HARDENED.swap(true, Ordering::SeqCst) {
+        let (nx, smep, smap) = harden();
+        crate::println!("[harden] NX {}  SMEP {}  SMAP {}", on_off(nx), on_off(smep), on_off(smap));
+        crate::serial_println!("[harden] NX {}  SMEP {}  SMAP {}", on_off(nx), on_off(smep), on_off(smap));
     }
     let (base, code_frames, stack_frames) = ensure_space()?;
     init_syscall_msrs();
@@ -751,6 +842,8 @@ pub fn run(code: &[u8]) -> Result<Exit, &'static str> {
             2 => "general protection fault",
             3 => "invalid opcode",
             4 => "divide error",
+            5 => "page fault: instruction fetch from a no-execute page (NX)",
+            6 => "page fault: write to a read-only page",
             _ => "unknown fault",
         };
         Ok(Exit::Fault(what, FAULT_ADDR.load(Ordering::SeqCst), FAULT_RIP.load(Ordering::SeqCst)))
@@ -790,12 +883,57 @@ extern "C" fn syscall_dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u
     }
 }
 
+// --- touching user memory safely ----------------------------------------------
+//
+// With SMAP on, the CPU faults if the KERNEL reads or writes a user-accessible
+// page -- unless RFLAGS.AC is set (`stac`; cleared again by `clac`). That turns
+// every accidental kernel dereference of a user pointer into an immediate
+// fault, and makes the deliberate ones (these two functions) easy to audit:
+// they are the ONLY places the kernel touches user memory. Interrupts are off
+// throughout a syscall, so AC can't leak into another context.
+
+static SMAP_ON: AtomicBool = AtomicBool::new(false);
+
+#[inline(always)]
+unsafe fn stac() {
+    if SMAP_ON.load(Ordering::Relaxed) {
+        core::arch::asm!("stac", options(nomem, nostack));
+    }
+}
+
+#[inline(always)]
+unsafe fn clac() {
+    if SMAP_ON.load(Ordering::Relaxed) {
+        core::arch::asm!("clac", options(nomem, nostack));
+    }
+}
+
+/// Copy `len` bytes out of user memory. Caller must have validated the range.
+fn copy_from_user(ptr: u64, len: usize) -> Vec<u8> {
+    let mut v = alloc::vec![0u8; len];
+    unsafe {
+        stac();
+        core::ptr::copy_nonoverlapping(ptr as *const u8, v.as_mut_ptr(), len);
+        clac();
+    }
+    v
+}
+
+/// Copy `data` into user memory. Caller must have validated the range.
+fn copy_to_user(ptr: u64, data: &[u8]) {
+    unsafe {
+        stac();
+        core::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+        clac();
+    }
+}
+
 fn sys_write(ptr: u64, len: u64) -> u64 {
     if len > 2048 || !user_range_ok(ptr, len) {
         return u64::MAX;
     }
-    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    for &b in bytes {
+    let bytes = copy_from_user(ptr, len as usize);
+    for &b in &bytes {
         // Only printable ASCII and newlines: never let a program inject
         // arbitrary bytes into the terminal.
         let c = if b == b'\n' || (0x20..0x7f).contains(&b) { b as char } else { '.' };
@@ -819,12 +957,11 @@ fn user_stack_ok(ptr: u64, len: u64) -> bool {
     }
 }
 
-fn user_str(ptr: u64, len: u64) -> Option<&'static str> {
+fn user_str(ptr: u64, len: u64) -> Option<String> {
     if len == 0 || len > 128 || !user_range_ok(ptr, len) {
         return None;
     }
-    let b = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    core::str::from_utf8(b).ok()
+    String::from_utf8(copy_from_user(ptr, len as usize)).ok()
 }
 
 /// readfile(name_ptr, name_len, buf_ptr, buf_len) -> bytes copied, or -1.
@@ -836,10 +973,10 @@ fn sys_readfile(np: u64, nl: u64, bp: u64, bl: u64) -> u64 {
     if !user_stack_ok(bp, bl) {
         return u64::MAX;
     }
-    match crate::fs::read(name) {
+    match crate::fs::read(&name) {
         Some(text) => {
             let n = text.len().min(bl as usize);
-            unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), bp as *mut u8, n) };
+            copy_to_user(bp, &text.as_bytes()[..n]);
             n as u64
         }
         None => u64::MAX,
@@ -856,10 +993,10 @@ fn sys_writefile(np: u64, nl: u64, dp: u64, dl: u64) -> u64 {
     if dl > 2048 || !user_range_ok(dp, dl) {
         return u64::MAX;
     }
-    let data = unsafe { core::slice::from_raw_parts(dp as *const u8, dl as usize) };
-    match core::str::from_utf8(data) {
+    let data = copy_from_user(dp, dl as usize);
+    match core::str::from_utf8(&data) {
         Ok(text) => {
-            crate::fs::write(name, text);
+            crate::fs::write(&name, text);
             dl
         }
         Err(_) => u64::MAX,
@@ -873,7 +1010,7 @@ fn sys_getargs(bp: u64, bl: u64) -> u64 {
     }
     let args = ARGS.lock();
     let n = args.len().min(bl as usize);
-    unsafe { core::ptr::copy_nonoverlapping(args.as_ptr(), bp as *mut u8, n) };
+    copy_to_user(bp, &args.as_bytes()[..n]);
     n as u64
 }
 

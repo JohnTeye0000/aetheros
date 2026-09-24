@@ -256,8 +256,17 @@ extern "x86-interrupt" fn page_fault_handler(
     // Came from ring 3? Then it's the program's fault, not the kernel's: kill
     // the program and carry on.
     if stack_frame.code_segment & 3 == 3 {
+        let kind = if error_code.contains(PageFaultErrorCode::INSTRUCTION_FETCH) {
+            5
+        } else if error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+            && error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+        {
+            6
+        } else {
+            1
+        };
         crate::usermode::user_fault(
-            1,
+            kind,
             Cr2::read().as_u64(),
             stack_frame.instruction_pointer.as_u64(),
         );
