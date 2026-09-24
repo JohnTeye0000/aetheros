@@ -421,7 +421,10 @@ fn dispatch(input: &str) {
             }
         }
         "run" => {
-            let arg = args.trim();
+            let (arg, prog_args) = match args.trim().split_once(' ') {
+                Some((a, r)) => (a, r.trim()),
+                None => (args.trim(), ""),
+            };
             if arg.is_empty() {
                 out("usage: run <program>   programs (they run in ring 3):");
                 for (name, desc) in crate::usermode::PROGRAMS {
@@ -429,7 +432,7 @@ fn dispatch(input: &str) {
                     out(&line);
                 }
             } else {
-                match crate::usermode::spawn_builtin(arg) {
+                match crate::usermode::spawn_builtin(arg, prog_args) {
                     Ok(id) => {
                         let line = alloc::format!("started '{}' as thread {} (user mode)", arg, id);
                         out(&line);
@@ -447,7 +450,10 @@ fn dispatch(input: &str) {
             out(&line);
         }
         "exec" => {
-            let name = args.trim();
+            let (name, prog_args) = match args.trim().split_once(' ') {
+                Some((a, r)) => (a, r.trim()),
+                None => (args.trim(), ""),
+            };
             if name.is_empty() {
                 out("usage: exec <file>   (an AXE1 program in the filesystem; try: install)");
             } else {
@@ -458,7 +464,7 @@ fn dispatch(input: &str) {
                             let line = alloc::format!("exec: {}", e);
                             out(&line);
                         }
-                        Ok(code) => match crate::usermode::spawn_bytes(name, code) {
+                        Ok(code) => match crate::usermode::spawn_bytes(name, code, prog_args) {
                             Ok(id) => {
                                 let line = alloc::format!("loaded {} from the filesystem as thread {}", name, id);
                                 out(&line);

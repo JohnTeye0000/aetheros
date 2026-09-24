@@ -189,7 +189,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
         if let Some(key) = keyboard.process_keyevent(key_event) {
             // Feed printable keys to the shell; ignore raw/special keys for now.
             if let DecodedKey::Unicode(character) = key {
-                crate::shell::on_char(character);
+                if !crate::usermode::offer_key(character) {
+                    crate::shell::on_char(character);
+                }
             }
         }
     }

@@ -65,6 +65,10 @@ const SYS_WRITE: u64 = 1;
 const SYS_TICKS: u64 = 2;
 const SYS_GETPID: u64 = 3;
 const SYS_SLEEP: u64 = 4;
+const SYS_READFILE: u64 = 5;
+const SYS_GETARGS: u64 = 6;
+const SYS_READKEY: u64 = 7;
+const SYS_WRITEFILE: u64 = 8;
 
 global_asm!(
     r#"
@@ -129,6 +133,7 @@ global_asm!(
         mov  rcx, rdx            // arg3
         mov  rdx, rsi            // arg2
         mov  rsi, rdi            // arg1
+        mov  r8, r10             // arg4
         mov  rdi, rax            // syscall number
         sub  rsp, 8              // 16-byte align for the call
         cld
@@ -286,6 +291,120 @@ global_asm!(
     .equ ub_bad_len, ub_bad_end - ub_bad
     user_badptr_end:
 
+    .global user_cat_start
+    .global user_cat_end
+    user_cat_start:
+        sub  rsp, 2048
+        mov  eax, 6                      // getargs(rsp, 256) -> len
+        mov  rdi, rsp
+        mov  esi, 256
+        int  0x80
+        mov  r12, rax
+        cmp  r12, 0
+        jle  uk_usage
+        mov  eax, 5                      // readfile(name, len, rsp+256, 1500)
+        mov  rdi, rsp
+        mov  rsi, r12
+        lea  rdx, [rsp + 256]
+        mov  r10d, 1500
+        int  0x80
+        cmp  rax, 0
+        jl   uk_fail
+        mov  rsi, rax                    // write(rsp+256, n)
+        lea  rdi, [rsp + 256]
+        mov  eax, 1
+        int  0x80
+        mov  eax, 0
+        xor  edi, edi
+        int  0x80
+    uk_usage:
+        mov  eax, 1
+        lea  rdi, [rip + uk_m1]
+        mov  esi, offset uk_m1_len
+        int  0x80
+        mov  eax, 0
+        mov  edi, 2
+        int  0x80
+    uk_fail:
+        mov  eax, 1
+        lea  rdi, [rip + uk_m2]
+        mov  esi, offset uk_m2_len
+        int  0x80
+        mov  eax, 0
+        mov  edi, 1
+        int  0x80
+    uk_m1:
+        .ascii "usage: run cat <filename>\n"
+    uk_m1_end:
+    .equ uk_m1_len, uk_m1_end - uk_m1
+    uk_m2:
+        .ascii "cat: could not read that file\n"
+    uk_m2_end:
+    .equ uk_m2_len, uk_m2_end - uk_m2
+    user_cat_end:
+
+    .global user_keys_start
+    .global user_keys_end
+    user_keys_start:
+        sub  rsp, 16
+        mov  eax, 1
+        lea  rdi, [rip + ukk_m]
+        mov  esi, offset ukk_m_len
+        int  0x80
+        xor  r12d, r12d
+    ukk_loop:
+        mov  eax, 7                      // readkey() blocks until a key arrives
+        int  0x80
+        cmp  eax, 10
+        je   ukk_done
+        cmp  eax, 13
+        je   ukk_done
+        mov  byte ptr [rsp], al
+        inc  r12d
+        mov  eax, 1                      // echo it
+        mov  rdi, rsp
+        mov  esi, 1
+        int  0x80
+        jmp  ukk_loop
+    ukk_done:
+        mov  byte ptr [rsp], 0x0a
+        mov  eax, 1
+        mov  rdi, rsp
+        mov  esi, 1
+        int  0x80
+        mov  eax, 0                      // exit(chars typed)
+        mov  edi, r12d
+        int  0x80
+    ukk_m:
+        .ascii "typing into a ring-3 program (Enter to finish): "
+    ukk_m_end:
+    .equ ukk_m_len, ukk_m_end - ukk_m
+    user_keys_end:
+
+    .global user_note_start
+    .global user_note_end
+    user_note_start:
+        mov  eax, 8                      // writefile("made.txt", 8, msg, len)
+        lea  rdi, [rip + un_name]
+        mov  esi, 8
+        lea  rdx, [rip + un_msg]
+        mov  r10d, offset un_msg_len
+        int  0x80
+        mov  edi, 0
+        cmp  rax, -1
+        jne  un_exit
+        mov  edi, 1
+    un_exit:
+        mov  eax, 0
+        int  0x80
+    un_name:
+        .ascii "made.txt"
+    un_msg:
+        .ascii "written by a ring-3 program via the writefile syscall\n"
+    un_msg_end:
+    .equ un_msg_len, un_msg_end - un_msg
+    user_note_end:
+
     .text
     "#
 );
@@ -332,6 +451,9 @@ pub const PROGRAMS: &[(&str, &str)] = &[
     ("hlt", "execute a privileged instruction -> #GP -> killed"),
     ("poke", "write to kernel memory -> page fault -> killed"),
     ("badptr", "pass the kernel a kernel pointer -> write() refuses"),
+    ("cat", "read the file named in argv via readfile, print it"),
+    ("keys", "read keystrokes through the readkey syscall"),
+    ("note", "create made.txt from ring 3 via writefile"),
 ];
 
 pub fn builtin(name: &str) -> Option<&'static [u8]> {
@@ -342,6 +464,9 @@ pub fn builtin(name: &str) -> Option<&'static [u8]> {
         "hlt" => blob!(user_hlt_start, user_hlt_end),
         "poke" => blob!(user_poke_start, user_poke_end),
         "badptr" => blob!(user_badptr_start, user_badptr_end),
+        "cat" => blob!(user_cat_start, user_cat_end),
+        "keys" => blob!(user_keys_start, user_keys_end),
+        "note" => blob!(user_note_start, user_note_end),
         _ => return None,
     })
 }
@@ -507,7 +632,7 @@ pub fn user_fault(kind: usize, addr: u64, rip: u64) -> ! {
 // --- system calls ------------------------------------------------------------
 
 #[no_mangle]
-extern "C" fn syscall_dispatch(nr: u64, a1: u64, a2: u64, _a3: u64) -> u64 {
+extern "C" fn syscall_dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     match nr {
         SYS_EXIT => unsafe { kernel_resume(SAVED_RSP.load(Ordering::SeqCst), a1 & 0xFFFF_FFFF) },
         SYS_WRITE => sys_write(a1, a2),
@@ -517,12 +642,16 @@ extern "C" fn syscall_dispatch(nr: u64, a1: u64, a2: u64, _a3: u64) -> u64 {
             crate::scheduler::sleep_ticks(a1.min(100));
             0
         }
+        SYS_READFILE => sys_readfile(a1, a2, a3, a4),
+        SYS_WRITEFILE => sys_writefile(a1, a2, a3, a4),
+        SYS_GETARGS => sys_getargs(a1, a2),
+        SYS_READKEY => sys_readkey(),
         _ => u64::MAX, // ENOSYS
     }
 }
 
 fn sys_write(ptr: u64, len: u64) -> u64 {
-    if len > 512 || !user_range_ok(ptr, len) {
+    if len > 2048 || !user_range_ok(ptr, len) {
         return u64::MAX;
     }
     let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
@@ -536,12 +665,124 @@ fn sys_write(ptr: u64, len: u64) -> u64 {
     len
 }
 
+/// Like `user_range_ok`, but for buffers the kernel will WRITE into: only the
+/// stack is writable memory (the code pages are read-only to the program).
+fn user_stack_ok(ptr: u64, len: u64) -> bool {
+    let base = match SPACE.lock().as_ref() {
+        Some(s) => s.base,
+        None => return false,
+    };
+    let sbase = base + STACK_OFFSET;
+    match ptr.checked_add(len) {
+        Some(end) => ptr >= sbase && end <= sbase + STACK_BYTES,
+        None => false,
+    }
+}
+
+fn user_str(ptr: u64, len: u64) -> Option<&'static str> {
+    if len == 0 || len > 128 || !user_range_ok(ptr, len) {
+        return None;
+    }
+    let b = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    core::str::from_utf8(b).ok()
+}
+
+/// readfile(name_ptr, name_len, buf_ptr, buf_len) -> bytes copied, or -1.
+fn sys_readfile(np: u64, nl: u64, bp: u64, bl: u64) -> u64 {
+    let name = match user_str(np, nl) {
+        Some(n) => n,
+        None => return u64::MAX,
+    };
+    if !user_stack_ok(bp, bl) {
+        return u64::MAX;
+    }
+    match crate::fs::read(name) {
+        Some(text) => {
+            let n = text.len().min(bl as usize);
+            unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), bp as *mut u8, n) };
+            n as u64
+        }
+        None => u64::MAX,
+    }
+}
+
+/// writefile(name_ptr, name_len, data_ptr, data_len) -> data_len, or -1.
+/// Contents must be UTF-8 text (the filesystem stores Strings).
+fn sys_writefile(np: u64, nl: u64, dp: u64, dl: u64) -> u64 {
+    let name = match user_str(np, nl) {
+        Some(n) => n,
+        None => return u64::MAX,
+    };
+    if dl > 2048 || !user_range_ok(dp, dl) {
+        return u64::MAX;
+    }
+    let data = unsafe { core::slice::from_raw_parts(dp as *const u8, dl as usize) };
+    match core::str::from_utf8(data) {
+        Ok(text) => {
+            crate::fs::write(name, text);
+            dl
+        }
+        Err(_) => u64::MAX,
+    }
+}
+
+/// getargs(buf_ptr, buf_len) -> bytes copied (0 if the program got no args).
+fn sys_getargs(bp: u64, bl: u64) -> u64 {
+    if !user_stack_ok(bp, bl) {
+        return u64::MAX;
+    }
+    let args = ARGS.lock();
+    let n = args.len().min(bl as usize);
+    unsafe { core::ptr::copy_nonoverlapping(args.as_ptr(), bp as *mut u8, n) };
+    n as u64
+}
+
+// --- keyboard input for user programs ---------------------------------------
+//
+// Keys normally go to the shell. While a user program is *blocked in readkey*
+// the keyboard handler hands keys to it instead (`offer_key`), so the shell
+// (and `kill`) keeps working whenever the program isn't asking for input.
+
+static KEYQ: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+static WAITING_FOR_KEY: AtomicBool = AtomicBool::new(false);
+
+/// Called by the keyboard interrupt handler (interrupts off). Returns true if
+/// a user program consumed the key.
+pub fn offer_key(c: char) -> bool {
+    if !WAITING_FOR_KEY.load(Ordering::SeqCst) {
+        return false;
+    }
+    let mut q = KEYQ.lock();
+    if q.len() < 64 {
+        q.push(if c.is_ascii() { c as u8 } else { b'?' });
+    }
+    true
+}
+
+fn sys_readkey() -> u64 {
+    loop {
+        let got = {
+            let mut q = KEYQ.lock();
+            if q.is_empty() { None } else { Some(q.remove(0)) }
+        };
+        if let Some(k) = got {
+            WAITING_FOR_KEY.store(false, Ordering::SeqCst);
+            return k as u64;
+        }
+        WAITING_FOR_KEY.store(true, Ordering::SeqCst);
+        crate::scheduler::sleep_ticks(1);
+    }
+}
+
 // --- launching from the shell -------------------------------------------------
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static RUNNING_THREAD: AtomicUsize = AtomicUsize::new(0);
 
 /// The program waiting for its thread to pick it up: `(name, machine code)`.
+/// Argument string for the running program (everything after the name).
+static ARGS: Mutex<String> = Mutex::new(String::new());
+
 static PENDING: Mutex<Option<(String, Vec<u8>)>> = Mutex::new(None);
 
 // --- the on-disk program format ("AXE1") -----------------------------------------
@@ -632,12 +873,14 @@ extern "C" fn user_thread(_: usize) {
             crate::serial_println!("[user] could not run: {}", e);
         }
     }
+    WAITING_FOR_KEY.store(false, Ordering::SeqCst);
+    KEYQ.lock().clear();
     RUNNING.store(false, Ordering::SeqCst);
     crate::shell::prompt();
 }
 
 /// Start `code` as a user process on its own kernel thread.
-pub fn spawn_bytes(name: &str, code: Vec<u8>) -> Result<usize, &'static str> {
+pub fn spawn_bytes(name: &str, code: Vec<u8>, args: &str) -> Result<usize, &'static str> {
     if code.len() > CODE_BYTES as usize {
         return Err("program too large (max 16 KiB)");
     }
@@ -648,6 +891,9 @@ pub fn spawn_bytes(name: &str, code: Vec<u8>) -> Result<usize, &'static str> {
     }
     RUNNING.store(true, Ordering::SeqCst);
     x86_64::instructions::interrupts::without_interrupts(|| {
+        *ARGS.lock() = String::from(args);
+    });
+    x86_64::instructions::interrupts::without_interrupts(|| {
         *PENDING.lock() = Some((String::from(name), code));
     });
     let id = crate::scheduler::spawn(name, user_thread, 0);
@@ -656,9 +902,9 @@ pub fn spawn_bytes(name: &str, code: Vec<u8>) -> Result<usize, &'static str> {
 }
 
 /// Start the named built-in program.
-pub fn spawn_builtin(name: &str) -> Result<usize, &'static str> {
+pub fn spawn_builtin(name: &str, args: &str) -> Result<usize, &'static str> {
     let code = builtin(name).ok_or("no such program (try: run)")?;
-    spawn_bytes(name, code.to_vec())
+    spawn_bytes(name, code.to_vec(), args)
 }
 
 /// Write every built-in program into the filesystem as `<name>.axe`.
