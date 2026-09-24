@@ -41,6 +41,8 @@
 
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use alloc::string::String;
+use alloc::vec::Vec;
 use spin::Mutex;
 use x86_64::structures::paging::{Mapper, Page, PageTableFlags, PhysFrame, Size4KiB, FrameAllocator};
 use x86_64::{PhysAddr, VirtAddr};
@@ -538,17 +540,78 @@ fn sys_write(ptr: u64, len: u64) -> u64 {
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static RUNNING_THREAD: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_PROGRAM: AtomicUsize = AtomicUsize::new(0);
 
-/// Kernel thread body: run built-in program number `arg` in ring 3.
-extern "C" fn user_thread(arg: usize) {
-    let name = PROGRAMS[arg].0;
-    let code = builtin(name).unwrap();
+/// The program waiting for its thread to pick it up: `(name, machine code)`.
+static PENDING: Mutex<Option<(String, Vec<u8>)>> = Mutex::new(None);
+
+// --- the on-disk program format ("AXE1") -----------------------------------------
+//
+// A program in the filesystem is plain text, so it can be written with `write`,
+// listed with `ls`, read with `cat`, and saved to the data disk like any file:
+//
+//     AXE1                       <- magic (rejects random text files)
+//     # comments run to end of line
+//     b8 00 00 00 00             <- x86-64 machine code, hex bytes,
+//     bf 07 00 00 00                any whitespace / grouping
+//     cd 80
+//
+// The loader validates before anything runs: magic, hex digits, non-empty,
+// and the size limit.
+
+/// Parse an AXE1 text file into machine code.
+pub fn parse_axe(text: &str) -> Result<Vec<u8>, &'static str> {
+    let mut tokens = text
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or(""))
+        .flat_map(|l| l.split_whitespace());
+    if tokens.next() != Some("AXE1") {
+        return Err("not an AXE1 program (missing magic \"AXE1\")");
+    }
+    let mut code = Vec::new();
+    for tok in tokens {
+        if tok.len() % 2 != 0 {
+            return Err("odd number of hex digits in a token");
+        }
+        let digits = tok.as_bytes();
+        for pair in digits.chunks(2) {
+            let hi = (pair[0] as char).to_digit(16).ok_or("invalid hex digit")?;
+            let lo = (pair[1] as char).to_digit(16).ok_or("invalid hex digit")?;
+            code.push((hi * 16 + lo) as u8);
+            if code.len() > CODE_BYTES as usize {
+                return Err("program too large (max 16 KiB)");
+            }
+        }
+    }
+    if code.is_empty() {
+        return Err("program has no code");
+    }
+    Ok(code)
+}
+
+/// Render machine code as an AXE1 text file (16 bytes per line).
+pub fn to_axe(name: &str, desc: &str, code: &[u8]) -> String {
+    use core::fmt::Write;
+    let mut s = String::new();
+    let _ = writeln!(s, "AXE1");
+    let _ = writeln!(s, "# {} - {}", name, desc);
+    for row in code.chunks(16) {
+        for b in row {
+            let _ = write!(s, "{:02x} ", b);
+        }
+        s.push('\n');
+    }
+    s
+}
+
+/// Kernel thread body: run the pending program in ring 3.
+extern "C" fn user_thread(_: usize) {
+    let (name, code) = x86_64::instructions::interrupts::without_interrupts(|| PENDING.lock().take())
+        .expect("user thread started with no program");
     let pid = crate::scheduler::current_id();
     crate::println!("[user] pid {} '{}' -> ring 3 ({} bytes)", pid, name, code.len());
     crate::serial_println!("[user] pid {} '{}' -> ring 3 ({} bytes)", pid, name, code.len());
 
-    let result = run(code);
+    let result = run(&code);
     match result {
         Ok(Exit::Code(c)) => {
             crate::println!("[user] pid {} exited with status {}", pid, c);
@@ -573,20 +636,38 @@ extern "C" fn user_thread(arg: usize) {
     crate::shell::prompt();
 }
 
-/// Start the named built-in program on its own kernel thread.
-pub fn spawn_builtin(name: &str) -> Result<usize, &'static str> {
-    let idx = PROGRAMS
-        .iter()
-        .position(|(n, _)| *n == name)
-        .ok_or("no such program (try: run)")?;
+/// Start `code` as a user process on its own kernel thread.
+pub fn spawn_bytes(name: &str, code: Vec<u8>) -> Result<usize, &'static str> {
+    if code.len() > CODE_BYTES as usize {
+        return Err("program too large (max 16 KiB)");
+    }
     if RUNNING.load(Ordering::SeqCst)
         && crate::scheduler::is_alive(RUNNING_THREAD.load(Ordering::SeqCst))
     {
         return Err("a user program is already running");
     }
     RUNNING.store(true, Ordering::SeqCst);
-    CURRENT_PROGRAM.store(idx, Ordering::SeqCst);
-    let id = crate::scheduler::spawn(PROGRAMS[idx].0, user_thread, idx);
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        *PENDING.lock() = Some((String::from(name), code));
+    });
+    let id = crate::scheduler::spawn(name, user_thread, 0);
     RUNNING_THREAD.store(id, Ordering::SeqCst);
     Ok(id)
+}
+
+/// Start the named built-in program.
+pub fn spawn_builtin(name: &str) -> Result<usize, &'static str> {
+    let code = builtin(name).ok_or("no such program (try: run)")?;
+    spawn_bytes(name, code.to_vec())
+}
+
+/// Write every built-in program into the filesystem as `<name>.axe`.
+pub fn install_all() -> usize {
+    for (name, desc) in PROGRAMS {
+        let code = builtin(name).unwrap();
+        let mut file = String::from(*name);
+        file.push_str(".axe");
+        crate::fs::write(&file, &to_axe(name, desc, code));
+    }
+    PROGRAMS.len()
 }

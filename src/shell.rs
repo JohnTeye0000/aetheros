@@ -140,7 +140,7 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  date  mem  ps  spawn  kill  run  save  load  heaptest  cpuinfo  lspci  acpi  hpet  disk  clear  history  crash  pagefault");
+            out("  help  echo  about  ticks  date  mem  ps  spawn  kill  run  exec  install  save  load  heaptest  cpuinfo  lspci  acpi  hpet  disk  clear  history  crash  pagefault");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
@@ -438,6 +438,37 @@ fn dispatch(input: &str) {
                         let line = alloc::format!("run: {}", e);
                         out(&line);
                     }
+                }
+            }
+        }
+        "install" => {
+            let n = crate::usermode::install_all();
+            let line = alloc::format!("installed {} programs as <name>.axe (see ls; run one with: exec hello.axe)", n);
+            out(&line);
+        }
+        "exec" => {
+            let name = args.trim();
+            if name.is_empty() {
+                out("usage: exec <file>   (an AXE1 program in the filesystem; try: install)");
+            } else {
+                match crate::fs::read(name) {
+                    None => out("exec: no such file"),
+                    Some(text) => match crate::usermode::parse_axe(&text) {
+                        Err(e) => {
+                            let line = alloc::format!("exec: {}", e);
+                            out(&line);
+                        }
+                        Ok(code) => match crate::usermode::spawn_bytes(name, code) {
+                            Ok(id) => {
+                                let line = alloc::format!("loaded {} from the filesystem as thread {}", name, id);
+                                out(&line);
+                            }
+                            Err(e) => {
+                                let line = alloc::format!("exec: {}", e);
+                                out(&line);
+                            }
+                        },
+                    },
                 }
             }
         }
