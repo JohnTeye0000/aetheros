@@ -38,22 +38,24 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **File, argument and keyboard syscalls** — ring-3 programs can `readfile`/`writefile`, receive arguments, and block on `readkey`. Kernel buffers are validated per direction (kernel-writes only into the program's stack); keys are routed to a program only while it is waiting for input.
 - [x] **SYSCALL/SYSRET fast path** — EFER/STAR/LSTAR/SFMASK configured, GDT reordered to satisfy SYSRET's selector arithmetic, hand-written entry stub that swaps to the kernel stack. Both `int 0x80` and `syscall` reach the same dispatcher.
 - [x] **Hardening: NX, SMEP, SMAP** — user stack is W^X (no-execute), kernel can't execute or accidentally touch user pages; all user-memory access funnelled through audited `stac`/`clac` copy helpers. Feature-detected via cpuid (verified on `-cpu max`).
+- [x] **Per-process address spaces** — each user process has its own PML4 (kernel half shared), CR3 is switched with the thread, kernel-entry stacks are per process, and frames are reclaimed at exit. Three concurrent processes at identical virtual addresses each keep their own data.
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
-Stage 30: with `-cpu max` NX/SMEP/SMAP are on; running code from the stack and overwriting a code page both kill the program with a precise reason.
+Stage 31: three `iso` processes run concurrently at the same virtual addresses; each reads back only its own tag.
 
-![boot-stage30.png](docs/boot-stage30.png)
+![boot-stage31.png](docs/boot-stage31.png)
 
 From the serial log:
 
 ```
-[harden] NX on  SMEP on  SMAP on
-[user] pid 2 KILLED: page fault: instruction fetch from a no-execute page (NX)
+memory at my stack address still holds: alpha
+memory at my stack address still holds: beta
+memory at my stack address still holds: gamma
 ```
 
-Every stage has its own screenshot in `docs/`: [0](docs/boot-stage0.png) · [1](docs/boot-stage1.png) · [2](docs/boot-stage2.png) · [3](docs/boot-stage3.png) · [4](docs/boot-stage4.png) · [5](docs/boot-stage5.png) · [6](docs/boot-stage6.png) · [7](docs/boot-stage7.png) · [8](docs/boot-stage8.png) · [9](docs/boot-stage9.png) · [10](docs/boot-stage10.png) · [11](docs/boot-stage11.png) · [12](docs/boot-stage12.png) · [13](docs/boot-stage13.png) · [14](docs/boot-stage14.png) · [15](docs/boot-stage15.png) · [16](docs/boot-stage16.png) · [17](docs/boot-stage17.png) · [18](docs/boot-stage18.png) · [19](docs/boot-stage19.png) · [20](docs/boot-stage20.png) · [21](docs/boot-stage21.png) · [22](docs/boot-stage22.png) · [23](docs/boot-stage23.png) · [24](docs/boot-stage24.png) · [25](docs/boot-stage25.png) · [26](docs/boot-stage26.png) · [27](docs/boot-stage27.png) · [28](docs/boot-stage28.png) · [29](docs/boot-stage29.png) · [30](docs/boot-stage30.png)
+Every stage has its own screenshot in `docs/`: [0](docs/boot-stage0.png) · [1](docs/boot-stage1.png) · [2](docs/boot-stage2.png) · [3](docs/boot-stage3.png) · [4](docs/boot-stage4.png) · [5](docs/boot-stage5.png) · [6](docs/boot-stage6.png) · [7](docs/boot-stage7.png) · [8](docs/boot-stage8.png) · [9](docs/boot-stage9.png) · [10](docs/boot-stage10.png) · [11](docs/boot-stage11.png) · [12](docs/boot-stage12.png) · [13](docs/boot-stage13.png) · [14](docs/boot-stage14.png) · [15](docs/boot-stage15.png) · [16](docs/boot-stage16.png) · [17](docs/boot-stage17.png) · [18](docs/boot-stage18.png) · [19](docs/boot-stage19.png) · [20](docs/boot-stage20.png) · [21](docs/boot-stage21.png) · [22](docs/boot-stage22.png) · [23](docs/boot-stage23.png) · [24](docs/boot-stage24.png) · [25](docs/boot-stage25.png) · [26](docs/boot-stage26.png) · [27](docs/boot-stage27.png) · [28](docs/boot-stage28.png) · [29](docs/boot-stage29.png) · [30](docs/boot-stage30.png) · [31](docs/boot-stage31.png)
 
 ## The build arc (the roadmap)
 
@@ -124,7 +126,7 @@ src/shell.rs       interactive command shell (line buffer + commands)
 src/fs.rs          in-memory read-write filesystem (ramdisk)
 src/scheduler.rs   preemptive kernel threads: context switch, spawn, round-robin
 src/persist.rs     saving / restoring the filesystem on the data disk (AFS1 format)
-src/usermode.rs    ring 3: enter_user/iretq, int 0x80 syscalls, user address space, AXE1 loader
+src/usermode.rs    ring 3, syscalls, per-process address spaces, AXE1 loader
 .cargo/config.toml build-std + target + bootimage runner config
 docs/              boot screenshots + devlog/ (plain-English notes per milestone)
 ```

@@ -41,10 +41,13 @@
 
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
-use x86_64::structures::paging::{Mapper, Page, PageTableFlags, PhysFrame, Size4KiB, FrameAllocator};
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
+};
 use x86_64::{PhysAddr, VirtAddr};
 
 use crate::{print, serial_print};
@@ -74,6 +77,7 @@ global_asm!(
     r#"
     // enter_user(entry rdi, user_rsp rsi, saved_slot rdx, cs rcx, ss r8, rsp0_slot r9) -> status
     .global enter_user
+    .global fast_kernel_rsp
     enter_user:
         push rbp
         push rbx
@@ -550,6 +554,41 @@ global_asm!(
     .equ usm_msg_len, usm_msg_end - usm_msg
     user_selfmod_end:
 
+    .global user_iso_start
+    .global user_iso_end
+    user_iso_start:
+        sub  rsp, 256
+        mov  eax, 6                      // getargs(rsp, 32): my private tag
+        mov  rdi, rsp
+        mov  esi, 32
+        int  0x80
+        mov  r12, rax
+        cmp  r12, 0
+        jg   ui_have
+        mov  r12d, 1
+        mov  byte ptr [rsp], 0x3f        // '?'
+    ui_have:
+        mov  eax, 4                      // sleep: other processes run meanwhile,
+        mov  edi, 20                     // storing THEIR tag at this same address
+        int  0x80
+        mov  eax, 1
+        lea  rdi, [rip + ui_m]
+        mov  esi, offset ui_m_len
+        int  0x80
+        mov  byte ptr [rsp + r12], 0x0a
+        lea  rsi, [r12 + 1]
+        mov  eax, 1
+        mov  rdi, rsp
+        int  0x80
+        mov  eax, 0
+        xor  edi, edi
+        int  0x80
+    ui_m:
+        .ascii "memory at my stack address still holds: "
+    ui_m_end:
+    .equ ui_m_len, ui_m_end - ui_m
+    user_iso_end:
+
     .text
     "#
 );
@@ -566,6 +605,7 @@ extern "C" {
     fn kernel_resume(saved_rsp: u64, status: u64) -> !;
     fn syscall_entry();
     fn syscall_fast_entry();
+    static mut fast_kernel_rsp: u64;
 }
 
 /// Address of the `int 0x80` entry stub, for the IDT.
@@ -662,6 +702,7 @@ pub const PROGRAMS: &[(&str, &str)] = &[
     ("keys", "read keystrokes through the readkey syscall"),
     ("note", "create made.txt from ring 3 via writefile"),
     ("fast", "greet, sleep, getpid and exit via the SYSCALL instruction"),
+    ("iso", "store <arg> on the stack, sleep, read it back (isolation demo)"),
     ("nx", "execute code from the stack -> NX page fault -> killed"),
     ("selfmod", "overwrite own code page -> W^X page fault -> killed"),
     ("bint", "200k getpid calls via int 0x80; exit status = ticks taken"),
@@ -680,6 +721,7 @@ pub fn builtin(name: &str) -> Option<&'static [u8]> {
         "keys" => blob!(user_keys_start, user_keys_end),
         "note" => blob!(user_note_start, user_note_end),
         "fast" => blob!(user_fast_start, user_fast_end),
+        "iso" => blob!(user_iso_start, user_iso_end),
         "nx" => blob!(user_nx_start, user_nx_end),
         "selfmod" => blob!(user_selfmod_start, user_selfmod_end),
         "bint" => blob!(user_bint_start, user_bint_end),
@@ -688,83 +730,247 @@ pub fn builtin(name: &str) -> Option<&'static [u8]> {
     })
 }
 
-// --- user address space ------------------------------------------------------
+// --- per-process address spaces -----------------------------------------------
+//
+// Every user process gets its OWN top-level page table (PML4). Two processes
+// both see their code at `USER_BASE` and their stack just above it -- the same
+// virtual addresses -- yet those addresses map to different physical frames, so
+// neither can see (or corrupt) the other. The kernel's own mappings are copied
+// into every table (the entries point at the same lower-level tables, so the
+// kernel is shared and stays at the same addresses in every address space).
+// The scheduler switches CR3 whenever it switches threads (`on_switch_to`).
 
-struct UserSpace {
-    base: u64,
-    code: [PhysFrame; CODE_PAGES],
-    stack: [PhysFrame; STACK_PAGES],
+/// Virtual address where every process's code is mapped (one PML4 slot chosen
+/// once at first use: a slot that is empty in the kernel's own tables).
+static USER_BASE: AtomicU64 = AtomicU64::new(0);
+
+const MAX_PROCS: usize = 4;
+
+struct Proc {
+    tid: usize,
+    name: String,
+    code_len: usize,
+    pml4: PhysFrame,
+    /// Every physical frame this process owns (PML4, page tables, code, stack),
+    /// so teardown can hand them all back.
+    frames: Vec<PhysFrame>,
+    /// Kernel stack pointer saved by `enter_user`: where `exit`/faults resume.
+    saved_rsp: u64,
+    args: String,
+    fault_kind: usize,
+    fault_addr: u64,
+    fault_rip: u64,
 }
 
-static SPACE: Mutex<Option<UserSpace>> = Mutex::new(None);
+/// All live processes. Only ever locked with interrupts disabled.
+static PROCS: Mutex<Vec<Box<Proc>>> = Mutex::new(Vec::new());
 
-/// Map the user code + stack pages the first time a program runs. They stay
-/// mapped afterwards and are simply re-zeroed and re-filled for each program.
-fn ensure_space() -> Result<(u64, [PhysFrame; CODE_PAGES], [PhysFrame; STACK_PAGES]), &'static str>
-{
-    if let Some(s) = SPACE.lock().as_ref() {
-        return Ok((s.base, s.code, s.stack));
+fn with_current<R>(f: impl FnOnce(&mut Proc) -> R) -> Option<R> {
+    let tid = crate::scheduler::current_id();
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        PROCS.lock().iter_mut().find(|p| p.tid == tid).map(|p| f(p))
+    })
+}
+
+/// A frame allocator wrapper that remembers everything it hands out, so the
+/// process can later give every frame back.
+struct Track<'a> {
+    inner: &'a mut crate::memory::BootInfoFrameAllocator,
+    got: Vec<PhysFrame>,
+}
+
+unsafe impl FrameAllocator<Size4KiB> for Track<'_> {
+    fn allocate_frame(&mut self) -> Option<PhysFrame> {
+        let f = self.inner.allocate_frame()?;
+        self.got.push(f);
+        Some(f)
     }
-
-    let built = crate::memory::with_mem(|mapper, frames| -> Result<UserSpace, &'static str> {
-        // Find an entirely unused top-level slot in the lower half, so every
-        // table we create for it is ours (and can safely be marked user-visible).
-        let slot = (1..256usize)
-            .find(|&i| mapper.level_4_table()[i].is_unused())
-            .ok_or("no free top-level page-table slot")?;
-        let base = (slot as u64) << 39;
-
-        let leaf = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-        let table = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
-
-        let mut map_page = |addr: u64, flags: PageTableFlags| -> Result<PhysFrame, &'static str> {
-            let frame = frames.allocate_frame().ok_or("out of physical frames")?;
-            let page: Page<Size4KiB> = Page::containing_address(VirtAddr::new(addr));
-            unsafe {
-                mapper
-                    .map_to_with_table_flags(page, frame, flags, table, frames)
-                    .map_err(|_| "mapping a user page failed")?
-                    .flush();
-            }
-            Ok(frame)
-        };
-
-        // Code: user-readable, NOT writable (a program can't rewrite itself).
-        let mut code = [PhysFrame::containing_address(PhysAddr::new(0)); CODE_PAGES];
-        for (i, slot) in code.iter_mut().enumerate() {
-            *slot = map_page(base + (i as u64) * 4096, leaf)?;
-        }
-        // Stack: user-readable and writable, but NEVER executable (W^X).
-        let mut stack = [PhysFrame::containing_address(PhysAddr::new(0)); STACK_PAGES];
-        for (i, slot) in stack.iter_mut().enumerate() {
-            *slot = map_page(
-                base + STACK_OFFSET + (i as u64) * 4096,
-                leaf | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
-            )?;
-        }
-        Ok(UserSpace { base, code, stack })
-    });
-
-    let space = built.ok_or("memory manager not installed")??;
-    let out = (space.base, space.code, space.stack);
-    *SPACE.lock() = Some(space);
-    Ok(out)
 }
 
-/// Zero a physical frame through the kernel's physical-memory mapping.
+fn map_one(
+    mapper: &mut OffsetPageTable,
+    track: &mut Track,
+    addr: u64,
+    frame: PhysFrame,
+    flags: PageTableFlags,
+) -> Result<(), &'static str> {
+    // Parent tables must be user-accessible too, or the leaf's user bit is moot.
+    let table = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    let page: Page<Size4KiB> = Page::containing_address(VirtAddr::new(addr));
+    unsafe {
+        mapper
+            .map_to_with_table_flags(page, frame, flags, table, track)
+            .map_err(|_| "mapping a user page failed")?
+            .ignore(); // not the active tables: nothing to flush
+    }
+    Ok(())
+}
+
+/// Zero-fill / access a physical frame through the kernel's physical-memory map.
 fn frame_bytes(frame: PhysFrame) -> &'static mut [u8] {
     let v = crate::memory::phys_to_virt(frame.start_address());
     unsafe { core::slice::from_raw_parts_mut(v.as_mut_ptr::<u8>(), 4096) }
+}
+
+fn build_inner(
+    kmapper: &mut OffsetPageTable,
+    track: &mut Track,
+    name: &str,
+    code: &[u8],
+    args: &str,
+) -> Result<Box<Proc>, &'static str> {
+    let mut base = USER_BASE.load(Ordering::SeqCst);
+    if base == 0 {
+        let slot = (1..256usize)
+            .find(|&i| kmapper.level_4_table()[i].is_unused())
+            .ok_or("no free top-level page-table slot")?;
+        base = (slot as u64) << 39;
+        USER_BASE.store(base, Ordering::SeqCst);
+    }
+
+    // A fresh top-level table containing a copy of the kernel's entries.
+    let pml4 = track.allocate_frame().ok_or("out of physical frames")?;
+    let table: &'static mut PageTable =
+        unsafe { &mut *crate::memory::phys_to_virt(pml4.start_address()).as_mut_ptr::<PageTable>() };
+    table.zero();
+    let kt = kmapper.level_4_table();
+    for i in 0..512 {
+        if !kt[i].is_unused() {
+            table[i] = kt[i].clone();
+        }
+    }
+    let mut mapper =
+        unsafe { OffsetPageTable::new(table, VirtAddr::new(crate::memory::phys_offset())) };
+
+    let leaf = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    // Code: user-readable, NOT writable.
+    let mut code_frames = [PhysFrame::containing_address(PhysAddr::new(0)); CODE_PAGES];
+    for i in 0..CODE_PAGES {
+        let f = track.allocate_frame().ok_or("out of physical frames")?;
+        map_one(&mut mapper, track, base + (i as u64) * 4096, f, leaf)?;
+        code_frames[i] = f;
+    }
+    // Stack: writable but NEVER executable (W^X).
+    let mut stack_frames = [PhysFrame::containing_address(PhysAddr::new(0)); STACK_PAGES];
+    for i in 0..STACK_PAGES {
+        let f = track.allocate_frame().ok_or("out of physical frames")?;
+        map_one(
+            &mut mapper,
+            track,
+            base + STACK_OFFSET + (i as u64) * 4096,
+            f,
+            leaf | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
+        )?;
+        stack_frames[i] = f;
+    }
+
+    for f in code_frames.iter().chain(stack_frames.iter()) {
+        frame_bytes(*f).fill(0);
+    }
+    for (i, chunk) in code.chunks(4096).enumerate() {
+        frame_bytes(code_frames[i])[..chunk.len()].copy_from_slice(chunk);
+    }
+
+    Ok(Box::new(Proc {
+        tid: 0,
+        name: String::from(name),
+        code_len: code.len(),
+        pml4,
+        frames: Vec::new(), // filled in by the caller from `track.got`
+        saved_rsp: 0,
+        args: String::from(args),
+        fault_kind: 0,
+        fault_addr: 0,
+        fault_rip: 0,
+    }))
+}
+
+/// Build a complete address space + process record for `code`.
+fn build_process(name: &str, code: &[u8], args: &str) -> Result<Box<Proc>, &'static str> {
+    crate::memory::with_mem(|kmapper, frames| {
+        let mut track = Track { inner: frames, got: Vec::new() };
+        match build_inner(kmapper, &mut track, name, code, args) {
+            Ok(mut p) => {
+                p.frames = core::mem::take(&mut track.got);
+                Ok(p)
+            }
+            Err(e) => {
+                for f in track.got.drain(..) {
+                    track.inner.release(f);
+                }
+                Err(e)
+            }
+        }
+    })
+    .ok_or("memory manager not installed")?
+}
+
+/// Hand every frame of a finished process back to the allocator.
+fn free_process(p: Box<Proc>) {
+    let frames = p.frames;
+    crate::memory::with_mem(|_, fa| {
+        for f in frames {
+            fa.release(f);
+        }
+    });
+}
+
+/// Called by the scheduler (interrupts off) just before it switches to thread
+/// `tid`: install that thread's address space and kernel-entry stack.
+pub fn on_switch_to(tid: usize) {
+    use x86_64::registers::control::Cr3;
+    let (target, rsp0) = {
+        let procs = PROCS.lock();
+        match procs.iter().find(|p| p.tid == tid) {
+            Some(p) => (p.pml4, p.saved_rsp),
+            None => (crate::memory::kernel_cr3(), 0),
+        }
+    };
+    let (cur, flags) = Cr3::read();
+    if cur != target {
+        unsafe { Cr3::write(target, flags) };
+    }
+    if rsp0 != 0 {
+        // Interrupts/syscalls from ring 3 must land on THIS process's stack.
+        unsafe {
+            crate::gdt::rsp0_slot().write_unaligned(rsp0);
+            core::ptr::write_volatile(core::ptr::addr_of_mut!(fast_kernel_rsp), rsp0);
+        }
+    }
+}
+
+/// Free the address spaces of processes whose thread was killed (`kill`) and
+/// so never got to clean up after itself. A table that is the ACTIVE one right
+/// now can't be freed (we'd be pulling the floor out) -- it's collected later.
+pub fn collect() {
+    use x86_64::registers::control::Cr3;
+    let cur = Cr3::read().0;
+    let dead: Vec<Box<Proc>> = x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut g = PROCS.lock();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < g.len() {
+            if !crate::scheduler::is_alive(g[i].tid) && g[i].pml4 != cur {
+                out.push(g.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        out
+    });
+    for p in dead {
+        free_process(p);
+    }
 }
 
 /// Is `[ptr, ptr+len)` entirely inside the running program's own mapped code
 /// or stack pages? (The unmapped gap between them is NOT acceptable: a kernel
 /// read there would page-fault in ring 0.)
 fn user_range_ok(ptr: u64, len: u64) -> bool {
-    let base = match SPACE.lock().as_ref() {
-        Some(s) => s.base,
-        None => return false,
-    };
+    let base = USER_BASE.load(Ordering::SeqCst);
+    if base == 0 {
+        return false;
+    }
     let end = match ptr.checked_add(len) {
         Some(e) => e,
         None => return false,
@@ -777,14 +983,6 @@ fn user_range_ok(ptr: u64, len: u64) -> bool {
 
 // --- running a program -------------------------------------------------------
 
-/// Where `enter_user` stashed the kernel stack pointer for `exit`/fault to
-/// restore.
-static SAVED_RSP: AtomicU64 = AtomicU64::new(0);
-
-static FAULT_KIND: AtomicUsize = AtomicUsize::new(0);
-static FAULT_ADDR: AtomicU64 = AtomicU64::new(0);
-static FAULT_RIP: AtomicU64 = AtomicU64::new(0);
-
 /// How a user program ended.
 pub enum Exit {
     Code(u64),
@@ -796,48 +994,25 @@ fn on_off(b: bool) -> &'static str {
     if b { "on" } else { "unsupported" }
 }
 
-/// Copy `code` into the user address space and run it to completion in ring 3.
-/// Must be called from a kernel thread (it borrows that thread's stack for
-/// ring 3 -> ring 0 transitions).
-pub fn run(code: &[u8]) -> Result<Exit, &'static str> {
-    if code.len() > CODE_BYTES as usize {
-        return Err("program too large (max 16 KiB)");
-    }
-    static HARDENED: AtomicBool = AtomicBool::new(false);
-    if !HARDENED.swap(true, Ordering::SeqCst) {
-        let (nx, smep, smap) = harden();
-        crate::println!("[harden] NX {}  SMEP {}  SMAP {}", on_off(nx), on_off(smep), on_off(smap));
-        crate::serial_println!("[harden] NX {}  SMEP {}  SMAP {}", on_off(nx), on_off(smep), on_off(smap));
-    }
-    let (base, code_frames, stack_frames) = ensure_space()?;
-    init_syscall_msrs();
-
-    for f in code_frames.iter().chain(stack_frames.iter()) {
-        frame_bytes(*f).fill(0);
-    }
-    for (i, chunk) in code.chunks(4096).enumerate() {
-        frame_bytes(code_frames[i])[..chunk.len()].copy_from_slice(chunk);
-    }
-
+/// Run the calling thread's process in ring 3 until it exits or faults.
+/// (The thread's process record and address space were built by `spawn_bytes`;
+/// the scheduler already switched CR3 to it when it picked this thread.)
+fn run_current() -> Result<Exit, &'static str> {
+    let saved_ptr = with_current(|p| &mut p.saved_rsp as *mut u64).ok_or("no process record")?;
+    let base = USER_BASE.load(Ordering::SeqCst);
     let (cs, ss) = crate::gdt::user_selectors();
     let user_rsp = base + STACK_OFFSET + STACK_BYTES;
-    FAULT_KIND.store(0, Ordering::SeqCst);
 
     let status = unsafe {
-        enter_user(
-            base,
-            user_rsp,
-            SAVED_RSP.as_ptr(),
-            cs as u64,
-            ss as u64,
-            crate::gdt::rsp0_slot(),
-        )
+        enter_user(base, user_rsp, saved_ptr, cs as u64, ss as u64, crate::gdt::rsp0_slot())
     };
     // We arrive back here from inside an interrupt gate, i.e. with IF clear.
     x86_64::instructions::interrupts::enable();
 
     if status == FAULT_STATUS {
-        let what = match FAULT_KIND.load(Ordering::SeqCst) {
+        let (kind, addr, rip) =
+            with_current(|p| (p.fault_kind, p.fault_addr, p.fault_rip)).unwrap_or((0, 0, 0));
+        let what = match kind {
             1 => "page fault",
             2 => "general protection fault",
             3 => "invalid opcode",
@@ -846,7 +1021,7 @@ pub fn run(code: &[u8]) -> Result<Exit, &'static str> {
             6 => "page fault: write to a read-only page",
             _ => "unknown fault",
         };
-        Ok(Exit::Fault(what, FAULT_ADDR.load(Ordering::SeqCst), FAULT_RIP.load(Ordering::SeqCst)))
+        Ok(Exit::Fault(what, addr, rip))
     } else {
         Ok(Exit::Code(status))
     }
@@ -856,10 +1031,17 @@ pub fn run(code: &[u8]) -> Result<Exit, &'static str> {
 /// what happened and abandon the program, returning to the kernel thread that
 /// launched it. Never returns.
 pub fn user_fault(kind: usize, addr: u64, rip: u64) -> ! {
-    FAULT_KIND.store(kind, Ordering::SeqCst);
-    FAULT_ADDR.store(addr, Ordering::SeqCst);
-    FAULT_RIP.store(rip, Ordering::SeqCst);
-    unsafe { kernel_resume(SAVED_RSP.load(Ordering::SeqCst), FAULT_STATUS) }
+    let saved = with_current(|p| {
+        p.fault_kind = kind;
+        p.fault_addr = addr;
+        p.fault_rip = rip;
+        p.saved_rsp
+    })
+    .unwrap_or(0);
+    if saved == 0 {
+        panic!("user fault with no process (kind {})", kind);
+    }
+    unsafe { kernel_resume(saved, FAULT_STATUS) }
 }
 
 // --- system calls ------------------------------------------------------------
@@ -867,7 +1049,10 @@ pub fn user_fault(kind: usize, addr: u64, rip: u64) -> ! {
 #[no_mangle]
 extern "C" fn syscall_dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     match nr {
-        SYS_EXIT => unsafe { kernel_resume(SAVED_RSP.load(Ordering::SeqCst), a1 & 0xFFFF_FFFF) },
+        SYS_EXIT => {
+            let saved = with_current(|p| p.saved_rsp).unwrap_or(0);
+            unsafe { kernel_resume(saved, a1 & 0xFFFF_FFFF) }
+        }
         SYS_WRITE => sys_write(a1, a2),
         SYS_TICKS => crate::interrupts::ticks(),
         SYS_GETPID => crate::scheduler::current_id() as u64,
@@ -946,10 +1131,10 @@ fn sys_write(ptr: u64, len: u64) -> u64 {
 /// Like `user_range_ok`, but for buffers the kernel will WRITE into: only the
 /// stack is writable memory (the code pages are read-only to the program).
 fn user_stack_ok(ptr: u64, len: u64) -> bool {
-    let base = match SPACE.lock().as_ref() {
-        Some(s) => s.base,
-        None => return false,
-    };
+    let base = USER_BASE.load(Ordering::SeqCst);
+    if base == 0 {
+        return false;
+    }
     let sbase = base + STACK_OFFSET;
     match ptr.checked_add(len) {
         Some(end) => ptr >= sbase && end <= sbase + STACK_BYTES,
@@ -1008,7 +1193,7 @@ fn sys_getargs(bp: u64, bl: u64) -> u64 {
     if !user_stack_ok(bp, bl) {
         return u64::MAX;
     }
-    let args = ARGS.lock();
+    let args = with_current(|p| p.args.clone()).unwrap_or_default();
     let n = args.len().min(bl as usize);
     copy_to_user(bp, &args.as_bytes()[..n]);
     n as u64
@@ -1052,15 +1237,6 @@ fn sys_readkey() -> u64 {
 }
 
 // --- launching from the shell -------------------------------------------------
-
-static RUNNING: AtomicBool = AtomicBool::new(false);
-static RUNNING_THREAD: AtomicUsize = AtomicUsize::new(0);
-
-/// The program waiting for its thread to pick it up: `(name, machine code)`.
-/// Argument string for the running program (everything after the name).
-static ARGS: Mutex<String> = Mutex::new(String::new());
-
-static PENDING: Mutex<Option<(String, Vec<u8>)>> = Mutex::new(None);
 
 // --- the on-disk program format ("AXE1") -----------------------------------------
 //
@@ -1121,15 +1297,15 @@ pub fn to_axe(name: &str, desc: &str, code: &[u8]) -> String {
     s
 }
 
-/// Kernel thread body: run the pending program in ring 3.
+/// Kernel thread body: run this thread's process in ring 3, report how it
+/// ended, then tear its address space down.
 extern "C" fn user_thread(_: usize) {
-    let (name, code) = x86_64::instructions::interrupts::without_interrupts(|| PENDING.lock().take())
-        .expect("user thread started with no program");
     let pid = crate::scheduler::current_id();
-    crate::println!("[user] pid {} '{}' -> ring 3 ({} bytes)", pid, name, code.len());
-    crate::serial_println!("[user] pid {} '{}' -> ring 3 ({} bytes)", pid, name, code.len());
+    let (name, len) = with_current(|p| (p.name.clone(), p.code_len)).expect("process record");
+    crate::println!("[user] pid {} '{}' -> ring 3 ({} bytes, private address space)", pid, name, len);
+    crate::serial_println!("[user] pid {} '{}' -> ring 3 ({} bytes, private address space)", pid, name, len);
 
-    let result = run(&code);
+    let result = run_current();
     match result {
         Ok(Exit::Code(c)) => {
             crate::println!("[user] pid {} exited with status {}", pid, c);
@@ -1150,32 +1326,60 @@ extern "C" fn user_thread(_: usize) {
             crate::serial_println!("[user] could not run: {}", e);
         }
     }
+
+    // Tear down: drop the process record, go back to the kernel's tables, and
+    // only then free the frames (never free the page tables we're running on).
+    let mine = x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut g = PROCS.lock();
+        let pos = g.iter().position(|p| p.tid == pid);
+        let p = pos.map(|i| g.remove(i));
+        let kcr3 = crate::memory::kernel_cr3();
+        let (_, flags) = x86_64::registers::control::Cr3::read();
+        unsafe { x86_64::registers::control::Cr3::write(kcr3, flags) };
+        p
+    });
+    if let Some(p) = mine {
+        free_process(p);
+    }
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        KEYQ.lock().clear();
+    });
     WAITING_FOR_KEY.store(false, Ordering::SeqCst);
-    KEYQ.lock().clear();
-    RUNNING.store(false, Ordering::SeqCst);
     crate::shell::prompt();
 }
 
-/// Start `code` as a user process on its own kernel thread.
+/// One-time CPU setup the first time a program is launched.
+fn init_once() {
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if !DONE.swap(true, Ordering::SeqCst) {
+        let (nx, smep, smap) = harden();
+        crate::println!("[harden] NX {}  SMEP {}  SMAP {}", on_off(nx), on_off(smep), on_off(smap));
+        crate::serial_println!("[harden] NX {}  SMEP {}  SMAP {}", on_off(nx), on_off(smep), on_off(smap));
+    }
+    init_syscall_msrs();
+}
+
+/// Start `code` as a user process: build its private address space, then start
+/// a kernel thread that will enter ring 3.
 pub fn spawn_bytes(name: &str, code: Vec<u8>, args: &str) -> Result<usize, &'static str> {
     if code.len() > CODE_BYTES as usize {
         return Err("program too large (max 16 KiB)");
     }
-    if RUNNING.load(Ordering::SeqCst)
-        && crate::scheduler::is_alive(RUNNING_THREAD.load(Ordering::SeqCst))
-    {
-        return Err("a user program is already running");
+    init_once();
+    collect();
+    if x86_64::instructions::interrupts::without_interrupts(|| PROCS.lock().len()) >= MAX_PROCS {
+        return Err("too many user programs running (max 4)");
     }
-    RUNNING.store(true, Ordering::SeqCst);
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        *ARGS.lock() = String::from(args);
-    });
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        *PENDING.lock() = Some((String::from(name), code));
-    });
-    let id = crate::scheduler::spawn(name, user_thread, 0);
-    RUNNING_THREAD.store(id, Ordering::SeqCst);
-    Ok(id)
+    let proc_ = build_process(name, &code, args)?;
+    // Register the process and start its thread as one atomic step, so the
+    // thread can never run before its record exists.
+    Ok(x86_64::instructions::interrupts::without_interrupts(|| {
+        let id = crate::scheduler::spawn(name, user_thread, 0);
+        let mut p = proc_;
+        p.tid = id;
+        PROCS.lock().push(p);
+        id
+    }))
 }
 
 /// Start the named built-in program.

@@ -212,7 +212,7 @@ pub fn spawn(name: &str, entry: extern "C" fn(usize), arg: usize) -> usize {
 /// come first. If nothing else is ready, returns and the caller keeps running.
 fn schedule() {
     let now = crate::interrupts::ticks();
-    let (old_ptr, new_rsp) = {
+    let (old_ptr, new_rsp, next_id) = {
         let mut s = SCHED.lock();
         for t in s.threads.iter_mut() {
             if t.state == State::Sleeping && t.wake_tick <= now {
@@ -238,8 +238,11 @@ fn schedule() {
         s.threads[next].switches_in += 1;
         s.current = next;
         let old_ptr = &mut s.threads[cur].saved_rsp as *mut usize;
-        (old_ptr, s.threads[next].saved_rsp)
+        (old_ptr, s.threads[next].saved_rsp, s.threads[next].id)
     }; // lock released BEFORE switching: the thread we switch to will want it
+    // Give the incoming thread its own address space (user processes have
+    // private page tables) and kernel-entry stack before we run it.
+    crate::usermode::on_switch_to(next_id);
     unsafe { switch_context(old_ptr, new_rsp) };
 }
 

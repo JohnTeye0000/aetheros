@@ -169,6 +169,8 @@ fn dispatch(input: &str) {
                 used, total, allocs
             );
             crate::println!("RAM:  {} bytes usable (~{} MiB)", ram, ram / (1024 * 1024));
+            crate::println!("frames: {} physical 4 KiB frames in use", crate::memory::frames_in_use());
+            crate::serial_println!("frames in use: {}", crate::memory::frames_in_use());
             crate::serial_println!(
                 "heap {}/{} bytes, {} allocs; RAM {} bytes",
                 used, total, allocs, ram

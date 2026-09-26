@@ -63,6 +63,8 @@ unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut
 pub struct BootInfoFrameAllocator {
     memory_map: &'static MemoryMap,
     next: usize,
+    /// Frames handed back with `release`, reused before fresh ones.
+    free: alloc::vec::Vec<PhysFrame>,
 }
 
 impl BootInfoFrameAllocator {
@@ -70,7 +72,7 @@ impl BootInfoFrameAllocator {
     /// The caller must guarantee the memory map is valid and that the regions
     /// marked `Usable` are genuinely unused.
     pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
-        BootInfoFrameAllocator { memory_map, next: 0 }
+        BootInfoFrameAllocator { memory_map, next: 0, free: alloc::vec::Vec::new() }
     }
 
     /// An iterator over every usable 4 KiB frame in the memory map.
@@ -85,8 +87,24 @@ impl BootInfoFrameAllocator {
     }
 }
 
+impl BootInfoFrameAllocator {
+    /// Frames currently handed out (allocated minus released).
+    pub fn in_use(&self) -> usize {
+        self.next - self.free.len()
+    }
+
+    /// Give a frame back for reuse (e.g. when a process's address space is
+    /// torn down). The caller must guarantee nothing still maps it.
+    pub fn release(&mut self, frame: PhysFrame) {
+        self.free.push(frame);
+    }
+}
+
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
+        if let Some(f) = self.free.pop() {
+            return Some(f);
+        }
         let frame = self.usable_frames().nth(self.next);
         self.next += 1;
         frame
@@ -151,6 +169,9 @@ static KERNEL_MEM: spin::Mutex<Option<(OffsetPageTable<'static>, BootInfoFrameAl
 /// Hand the mapper + frame allocator over to the global slot (call once, after
 /// the heap is up).
 pub fn install(mapper: OffsetPageTable<'static>, frames: BootInfoFrameAllocator) {
+    // Remember the boot page tables: every process's tables are built as a copy
+    // of these (the kernel half), and kernel threads run on them.
+    KERNEL_CR3.store(x86_64::registers::control::Cr3::read().0.start_address().as_u64(), Ordering::SeqCst);
     *KERNEL_MEM.lock() = Some((mapper, frames));
 }
 
@@ -163,4 +184,21 @@ pub fn with_mem<R>(
         let mut guard = KERNEL_MEM.lock();
         guard.as_mut().map(|(m, fa)| f(m, fa))
     })
+}
+
+static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
+
+/// The page-table root the kernel booted with (kernel threads' address space).
+pub fn kernel_cr3() -> PhysFrame {
+    PhysFrame::containing_address(PhysAddr::new(KERNEL_CR3.load(Ordering::SeqCst)))
+}
+
+/// Offset at which all physical memory is mapped.
+pub fn phys_offset() -> u64 {
+    PHYS_MEM_OFFSET.load(Ordering::Relaxed)
+}
+
+/// Physical frames currently allocated (kernel + processes), if the manager is up.
+pub fn frames_in_use() -> usize {
+    with_mem(|_, fa| fa.in_use()).unwrap_or(0)
 }
