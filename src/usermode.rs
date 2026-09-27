@@ -72,6 +72,8 @@ const SYS_READFILE: u64 = 5;
 const SYS_GETARGS: u64 = 6;
 const SYS_READKEY: u64 = 7;
 const SYS_WRITEFILE: u64 = 8;
+const SYS_SEND: u64 = 9;
+const SYS_RECV: u64 = 10;
 
 global_asm!(
     r#"
@@ -589,6 +591,83 @@ global_asm!(
     .equ ui_m_len, ui_m_end - ui_m
     user_iso_end:
 
+    .global user_producer_start
+    .global user_producer_end
+    user_producer_start:
+        sub  rsp, 32
+        mov  r12d, 1
+    upr_loop:
+        mov  byte ptr [rsp], 0x70        // 'p'
+        mov  eax, r12d
+        add  eax, 0x30
+        mov  byte ptr [rsp + 1], al
+        mov  byte ptr [rsp + 2], 0x0a
+        mov  eax, 9                      // send("chan", 4, rsp, 3)
+        lea  rdi, [rip + upr_name]
+        mov  esi, 4
+        mov  rdx, rsp
+        mov  r10d, 3
+        int  0x80
+        mov  eax, 1                      // also echo locally, so the log shows both sides
+        lea  rdi, [rip + upr_tag]
+        mov  esi, offset upr_tag_len
+        int  0x80
+        mov  eax, 1
+        mov  rdi, rsp
+        mov  esi, 3
+        int  0x80
+        mov  eax, 4
+        mov  edi, 6
+        int  0x80
+        inc  r12d
+        cmp  r12d, 5
+        jle  upr_loop
+        mov  eax, 0
+        xor  edi, edi
+        int  0x80
+    upr_name:
+        .ascii "chan"
+    upr_tag:
+        .ascii "producer sent: "
+    upr_tag_end:
+    .equ upr_tag_len, upr_tag_end - upr_tag
+    user_producer_end:
+
+    .global user_consumer_start
+    .global user_consumer_end
+    user_consumer_start:
+        sub  rsp, 32
+        mov  r12d, 1
+    uco_loop:
+        mov  eax, 10                     // recv("chan", 4, rsp, 32)
+        lea  rdi, [rip + uco_name]
+        mov  esi, 4
+        mov  rdx, rsp
+        mov  r10d, 32
+        int  0x80
+        mov  r13, rax                    // bytes received
+        mov  eax, 1
+        lea  rdi, [rip + uco_tag]
+        mov  esi, offset uco_tag_len
+        int  0x80
+        mov  eax, 1
+        mov  rdi, rsp
+        mov  rsi, r13
+        int  0x80
+        inc  r12d
+        cmp  r12d, 5
+        jle  uco_loop
+        mov  eax, 0
+        xor  edi, edi
+        int  0x80
+    uco_name:
+        .ascii "chan"
+    uco_tag:
+        .ascii "consumer got:  "
+    uco_tag_end:
+    .equ uco_tag_len, uco_tag_end - uco_tag
+    user_consumer_end:
+
     .text
     "#
 );
@@ -703,6 +782,8 @@ pub const PROGRAMS: &[(&str, &str)] = &[
     ("note", "create made.txt from ring 3 via writefile"),
     ("fast", "greet, sleep, getpid and exit via the SYSCALL instruction"),
     ("iso", "store <arg> on the stack, sleep, read it back (isolation demo)"),
+    ("producer", "send 5 messages on channel 'chan' via the send syscall"),
+    ("consumer", "receive 5 messages from channel 'chan' via recv"),
     ("nx", "execute code from the stack -> NX page fault -> killed"),
     ("selfmod", "overwrite own code page -> W^X page fault -> killed"),
     ("bint", "200k getpid calls via int 0x80; exit status = ticks taken"),
@@ -722,6 +803,8 @@ pub fn builtin(name: &str) -> Option<&'static [u8]> {
         "note" => blob!(user_note_start, user_note_end),
         "fast" => blob!(user_fast_start, user_fast_end),
         "iso" => blob!(user_iso_start, user_iso_end),
+        "producer" => blob!(user_producer_start, user_producer_end),
+        "consumer" => blob!(user_consumer_start, user_consumer_end),
         "nx" => blob!(user_nx_start, user_nx_end),
         "selfmod" => blob!(user_selfmod_start, user_selfmod_end),
         "bint" => blob!(user_bint_start, user_bint_end),
@@ -1064,6 +1147,8 @@ extern "C" fn syscall_dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u
         SYS_WRITEFILE => sys_writefile(a1, a2, a3, a4),
         SYS_GETARGS => sys_getargs(a1, a2),
         SYS_READKEY => sys_readkey(),
+        SYS_SEND => sys_send(a1, a2, a3, a4),
+        SYS_RECV => sys_recv(a1, a2, a3, a4),
         _ => u64::MAX, // ENOSYS
     }
 }
@@ -1197,6 +1282,94 @@ fn sys_getargs(bp: u64, bl: u64) -> u64 {
     let n = args.len().min(bl as usize);
     copy_to_user(bp, &args.as_bytes()[..n]);
     n as u64
+}
+
+// --- inter-process communication: named channels ----------------------------
+//
+// A "channel" is a byte pipe identified by a short name, created the first
+// time anyone sends or receives on it and kept around after (so a consumer
+// launched second can still find a channel a producer launched first already
+// created). `send` blocks (sleeping, not spinning) while the channel is full;
+// `recv` blocks while it is empty. Neither call holds the queue lock while
+// blocked -- each retries the lock fresh every tick, the same pattern
+// `readkey` uses for the keyboard.
+
+const CHANNEL_CAPACITY: usize = 1024;
+const MAX_CHANNELS: usize = 8;
+
+static CHANNELS: Mutex<Vec<(String, alloc::collections::VecDeque<u8>)>> = Mutex::new(Vec::new());
+
+fn with_channel<R>(name: &str, create: bool, f: impl FnOnce(&mut alloc::collections::VecDeque<u8>) -> R) -> Option<R> {
+    let mut chans = CHANNELS.lock();
+    if let Some(c) = chans.iter_mut().find(|(n, _)| n == name) {
+        return Some(f(&mut c.1));
+    }
+    if !create || chans.len() >= MAX_CHANNELS {
+        return None;
+    }
+    chans.push((String::from(name), alloc::collections::VecDeque::new()));
+    let last = chans.last_mut().unwrap();
+    Some(f(&mut last.1))
+}
+
+/// send(name_ptr, name_len, data_ptr, data_len) -> bytes sent, or -1.
+/// Blocks (sleeping) while the channel is full; sends as much as fits each
+/// time it wakes, so a send larger than the whole channel still completes.
+fn sys_send(np: u64, nl: u64, dp: u64, dl: u64) -> u64 {
+    let name = match user_str(np, nl) {
+        Some(n) => n,
+        None => return u64::MAX,
+    };
+    if dl > 65536 || !user_range_ok(dp, dl) {
+        return u64::MAX;
+    }
+    let data = copy_from_user(dp, dl as usize);
+    let mut sent = 0usize;
+    while sent < data.len() {
+        let took = x86_64::instructions::interrupts::without_interrupts(|| {
+            with_channel(&name, true, |q| {
+                let room = CHANNEL_CAPACITY.saturating_sub(q.len());
+                let n = room.min(data.len() - sent);
+                q.extend(&data[sent..sent + n]);
+                n
+            })
+        });
+        match took {
+            Some(0) | None => crate::scheduler::sleep_ticks(1),
+            Some(n) => sent += n,
+        }
+    }
+    sent as u64
+}
+
+/// recv(name_ptr, name_len, buf_ptr, buf_len) -> bytes received (>=1), or -1.
+/// Blocks (sleeping) until the channel exists and has at least one byte.
+fn sys_recv(np: u64, nl: u64, bp: u64, bl: u64) -> u64 {
+    let name = match user_str(np, nl) {
+        Some(n) => n,
+        None => return u64::MAX,
+    };
+    if !user_stack_ok(bp, bl) {
+        return u64::MAX;
+    }
+    loop {
+        let got = x86_64::instructions::interrupts::without_interrupts(|| {
+            with_channel(&name, true, |q| {
+                let n = q.len().min(bl as usize);
+                if n == 0 {
+                    return None;
+                }
+                let bytes: Vec<u8> = q.drain(..n).collect();
+                Some(bytes)
+            })
+        })
+        .flatten();
+        if let Some(bytes) = got {
+            copy_to_user(bp, &bytes);
+            return bytes.len() as u64;
+        }
+        crate::scheduler::sleep_ticks(1);
+    }
 }
 
 // --- keyboard input for user programs ---------------------------------------
