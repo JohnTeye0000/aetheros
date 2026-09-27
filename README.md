@@ -40,26 +40,25 @@ This is a learning-in-the-open project, built one capability at a time. The goal
 - [x] **Hardening: NX, SMEP, SMAP** — user stack is W^X (no-execute), kernel can't execute or accidentally touch user pages; all user-memory access funnelled through audited `stac`/`clac` copy helpers. Feature-detected via cpuid (verified on `-cpu max`).
 - [x] **Per-process address spaces** — each user process has its own PML4 (kernel half shared), CR3 is switched with the thread, kernel-entry stacks are per process, and frames are reclaimed at exit. Three concurrent processes at identical virtual addresses each keep their own data.
 - [x] **Inter-process channels** — named byte pipes (`send`/`recv` syscalls), created lazily and shared by name; both calls block by sleeping (no CPU spent waiting). A producer and consumer process run concurrently, in either start order, exchanging messages through one named channel.
+- [x] **spawn syscall** — a ring-3 program can launch another program (built-in or an `.axe` file) directly, with the same name resolution as the shell's `run`/`exec`. `launcher` spawns `hello` and `cat motd` as independent processes from inside ring 3.
 - [x] **Panic handler** — a kernel-level last resort that paints the screen and halts.
 
 ### Proof it boots
 
-Stage 32: `producer` and `consumer` run as two independent processes, exchanging messages through a named channel — interleaved output proves real concurrency.
+Stage 33: `run launcher` spawns two child processes (`hello`, `cat motd`) via the spawn syscall, entirely from ring 3.
 
-![boot-stage32.png](docs/boot-stage32.png)
+![boot-stage33.png](docs/boot-stage33.png)
 
 From the serial log:
 
 ```
-run consumer
-run producer
-consumer got:  p1
-producer sent: p1
-producer sent: p2
-consumer got:  p2
+launcher: spawning two child programs via the spawn syscall...
+Hello from ring 3! ...
+Welcome to AetherOS. ...
+launcher: done (children run independently - see ps while they're alive).
 ```
 
-Every stage has its own screenshot in `docs/`: [0](docs/boot-stage0.png) · [1](docs/boot-stage1.png) · [2](docs/boot-stage2.png) · [3](docs/boot-stage3.png) · [4](docs/boot-stage4.png) · [5](docs/boot-stage5.png) · [6](docs/boot-stage6.png) · [7](docs/boot-stage7.png) · [8](docs/boot-stage8.png) · [9](docs/boot-stage9.png) · [10](docs/boot-stage10.png) · [11](docs/boot-stage11.png) · [12](docs/boot-stage12.png) · [13](docs/boot-stage13.png) · [14](docs/boot-stage14.png) · [15](docs/boot-stage15.png) · [16](docs/boot-stage16.png) · [17](docs/boot-stage17.png) · [18](docs/boot-stage18.png) · [19](docs/boot-stage19.png) · [20](docs/boot-stage20.png) · [21](docs/boot-stage21.png) · [22](docs/boot-stage22.png) · [23](docs/boot-stage23.png) · [24](docs/boot-stage24.png) · [25](docs/boot-stage25.png) · [26](docs/boot-stage26.png) · [27](docs/boot-stage27.png) · [28](docs/boot-stage28.png) · [29](docs/boot-stage29.png) · [30](docs/boot-stage30.png) · [31](docs/boot-stage31.png) · [32](docs/boot-stage32.png)
+Every stage has its own screenshot in `docs/`: [0](docs/boot-stage0.png) · [1](docs/boot-stage1.png) · [2](docs/boot-stage2.png) · [3](docs/boot-stage3.png) · [4](docs/boot-stage4.png) · [5](docs/boot-stage5.png) · [6](docs/boot-stage6.png) · [7](docs/boot-stage7.png) · [8](docs/boot-stage8.png) · [9](docs/boot-stage9.png) · [10](docs/boot-stage10.png) · [11](docs/boot-stage11.png) · [12](docs/boot-stage12.png) · [13](docs/boot-stage13.png) · [14](docs/boot-stage14.png) · [15](docs/boot-stage15.png) · [16](docs/boot-stage16.png) · [17](docs/boot-stage17.png) · [18](docs/boot-stage18.png) · [19](docs/boot-stage19.png) · [20](docs/boot-stage20.png) · [21](docs/boot-stage21.png) · [22](docs/boot-stage22.png) · [23](docs/boot-stage23.png) · [24](docs/boot-stage24.png) · [25](docs/boot-stage25.png) · [26](docs/boot-stage26.png) · [27](docs/boot-stage27.png) · [28](docs/boot-stage28.png) · [29](docs/boot-stage29.png) · [30](docs/boot-stage30.png) · [31](docs/boot-stage31.png) · [32](docs/boot-stage32.png) · [33](docs/boot-stage33.png)
 
 ## The build arc (the roadmap)
 

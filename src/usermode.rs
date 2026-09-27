@@ -74,6 +74,7 @@ const SYS_READKEY: u64 = 7;
 const SYS_WRITEFILE: u64 = 8;
 const SYS_SEND: u64 = 9;
 const SYS_RECV: u64 = 10;
+const SYS_SPAWN: u64 = 11;
 
 global_asm!(
     r#"
@@ -668,6 +669,53 @@ global_asm!(
     .equ uco_tag_len, uco_tag_end - uco_tag
     user_consumer_end:
 
+    .global user_launcher_start
+    .global user_launcher_end
+    user_launcher_start:
+        mov  eax, 1
+        lea  rdi, [rip + ul_msg]
+        mov  esi, offset ul_msg_len
+        int  0x80
+        mov  eax, 11                     // spawn("hello", 5, 0, 0)
+        lea  rdi, [rip + ul_hello]
+        mov  esi, 5
+        xor  edx, edx
+        xor  r10d, r10d
+        int  0x80
+        mov  r12, rax
+        mov  eax, 11                     // spawn("cat", 3, "motd", 4)
+        lea  rdi, [rip + ul_cat]
+        mov  esi, 3
+        lea  rdx, [rip + ul_arg]
+        mov  r10d, 4
+        int  0x80
+        mov  r13, rax
+        mov  eax, 4                      // give the children time to run and print
+        mov  edi, 20
+        int  0x80
+        mov  eax, 1
+        lea  rdi, [rip + ul_done]
+        mov  esi, offset ul_done_len
+        int  0x80
+        mov  eax, 0
+        xor  edi, edi
+        int  0x80
+    ul_msg:
+        .ascii "launcher: spawning two child programs via the spawn syscall...\n"
+    ul_msg_end:
+    .equ ul_msg_len, ul_msg_end - ul_msg
+    ul_hello:
+        .ascii "hello"
+    ul_cat:
+        .ascii "cat"
+    ul_arg:
+        .ascii "motd"
+    ul_done:
+        .ascii "launcher: done (children run independently - see ps while they're alive).\n"
+    ul_done_end:
+    .equ ul_done_len, ul_done_end - ul_done
+    user_launcher_end:
+
     .text
     "#
 );
@@ -784,6 +832,7 @@ pub const PROGRAMS: &[(&str, &str)] = &[
     ("iso", "store <arg> on the stack, sleep, read it back (isolation demo)"),
     ("producer", "send 5 messages on channel 'chan' via the send syscall"),
     ("consumer", "receive 5 messages from channel 'chan' via recv"),
+    ("launcher", "spawn other programs (hello, cat motd) via the spawn syscall"),
     ("nx", "execute code from the stack -> NX page fault -> killed"),
     ("selfmod", "overwrite own code page -> W^X page fault -> killed"),
     ("bint", "200k getpid calls via int 0x80; exit status = ticks taken"),
@@ -805,6 +854,7 @@ pub fn builtin(name: &str) -> Option<&'static [u8]> {
         "iso" => blob!(user_iso_start, user_iso_end),
         "producer" => blob!(user_producer_start, user_producer_end),
         "consumer" => blob!(user_consumer_start, user_consumer_end),
+        "launcher" => blob!(user_launcher_start, user_launcher_end),
         "nx" => blob!(user_nx_start, user_nx_end),
         "selfmod" => blob!(user_selfmod_start, user_selfmod_end),
         "bint" => blob!(user_bint_start, user_bint_end),
@@ -1149,6 +1199,7 @@ extern "C" fn syscall_dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u
         SYS_READKEY => sys_readkey(),
         SYS_SEND => sys_send(a1, a2, a3, a4),
         SYS_RECV => sys_recv(a1, a2, a3, a4),
+        SYS_SPAWN => sys_spawn(a1, a2, a3, a4),
         _ => u64::MAX, // ENOSYS
     }
 }
@@ -1369,6 +1420,39 @@ fn sys_recv(np: u64, nl: u64, bp: u64, bl: u64) -> u64 {
             return bytes.len() as u64;
         }
         crate::scheduler::sleep_ticks(1);
+    }
+}
+
+/// spawn(name_ptr, name_len, args_ptr, args_len) -> new pid, or -1.
+///
+/// A ring-3 program launching another ring-3 program: the name is looked up
+/// exactly the way the shell's `run`/`exec` do (a built-in first, else an
+/// `.axe` file with that exact name in the filesystem). The new process gets
+/// its own address space and runs independently -- the caller is NOT its
+/// parent in any special sense (no wait/reap here yet, see the limits below).
+fn sys_spawn(np: u64, nl: u64, ap: u64, al: u64) -> u64 {
+    let name = match user_str(np, nl) {
+        Some(n) if !n.is_empty() => n,
+        _ => return u64::MAX,
+    };
+    let args = if al == 0 {
+        String::new()
+    } else {
+        match user_str(ap, al) {
+            Some(a) => a,
+            None => return u64::MAX,
+        }
+    };
+    let code = match builtin(&name) {
+        Some(c) => c.to_vec(),
+        None => match crate::fs::read(&name).and_then(|t| parse_axe(&t).ok()) {
+            Some(c) => c,
+            None => return u64::MAX,
+        },
+    };
+    match spawn_bytes(&name, code, &args) {
+        Ok(id) => id as u64,
+        Err(_) => u64::MAX,
     }
 }
 
