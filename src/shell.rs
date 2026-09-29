@@ -466,7 +466,7 @@ fn dispatch(input: &str) {
                             let line = alloc::format!("exec: {}", e);
                             out(&line);
                         }
-                        Ok(code) => match crate::usermode::spawn_bytes(name, code, prog_args) {
+                        Ok(code) => match crate::usermode::spawn_bytes(name, code, prog_args, 0) {
                             Ok(id) => {
                                 let line = alloc::format!("loaded {} from the filesystem as thread {}", name, id);
                                 out(&line);

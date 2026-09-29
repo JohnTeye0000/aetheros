@@ -75,6 +75,7 @@ const SYS_WRITEFILE: u64 = 8;
 const SYS_SEND: u64 = 9;
 const SYS_RECV: u64 = 10;
 const SYS_SPAWN: u64 = 11;
+const SYS_WAIT: u64 = 12;
 
 global_asm!(
     r#"
@@ -716,6 +717,78 @@ global_asm!(
     .equ ul_done_len, ul_done_end - ul_done
     user_launcher_end:
 
+    .global user_waiter_start
+    .global user_waiter_end
+    user_waiter_start:
+        sub  rsp, 16
+        mov  eax, 12                     // wait() with no children yet -> must be -1
+        xor  edi, edi
+        xor  esi, esi
+        int  0x80
+        cmp  rax, -1
+        jne  uw_bug
+        mov  eax, 1
+        lea  rdi, [rip + uw_none]
+        mov  esi, offset uw_none_len
+        int  0x80
+        mov  eax, 11                     // spawn("count", 5, 0, 0)
+        lea  rdi, [rip + uw_count]
+        mov  esi, 5
+        xor  edx, edx
+        xor  r10d, r10d
+        int  0x80
+        mov  eax, 1
+        lea  rdi, [rip + uw_wait]
+        mov  esi, offset uw_wait_len
+        int  0x80
+        mov  eax, 12                     // wait(0, rsp): block for the child
+        xor  edi, edi
+        mov  rsi, rsp
+        int  0x80
+        mov  r12, rax                    // child pid
+        movzx r13, byte ptr [rsp]        // low byte of its exit status
+        add  r13b, 0x30
+        mov  eax, 1
+        lea  rdi, [rip + uw_done1]
+        mov  esi, offset uw_done1_len
+        int  0x80
+        mov  byte ptr [rsp + 8], r13b
+        mov  byte ptr [rsp + 9], 0x0a
+        mov  eax, 1
+        lea  rdi, [rsp + 8]
+        mov  esi, 2
+        int  0x80
+        mov  eax, 0
+        xor  edi, edi
+        int  0x80
+    uw_bug:
+        mov  eax, 1
+        lea  rdi, [rip + uw_bugmsg]
+        mov  esi, offset uw_bugmsg_len
+        int  0x80
+        mov  eax, 0
+        mov  edi, 1
+        int  0x80
+    uw_none:
+        .ascii "waiter: wait() with no children correctly returned -1\n"
+    uw_none_end:
+    .equ uw_none_len, uw_none_end - uw_none
+    uw_count:
+        .ascii "count"
+    uw_wait:
+        .ascii "waiter: spawned count, now blocking in wait() until it exits...\n"
+    uw_wait_end:
+    .equ uw_wait_len, uw_wait_end - uw_wait
+    uw_done1:
+        .ascii "waiter: child reaped, its exit status was: "
+    uw_done1_end:
+    .equ uw_done1_len, uw_done1_end - uw_done1
+    uw_bugmsg:
+        .ascii "BUG: wait() with no children did not return -1\n"
+    uw_bugmsg_end:
+    .equ uw_bugmsg_len, uw_bugmsg_end - uw_bugmsg
+    user_waiter_end:
+
     .text
     "#
 );
@@ -833,6 +906,7 @@ pub const PROGRAMS: &[(&str, &str)] = &[
     ("producer", "send 5 messages on channel 'chan' via the send syscall"),
     ("consumer", "receive 5 messages from channel 'chan' via recv"),
     ("launcher", "spawn other programs (hello, cat motd) via the spawn syscall"),
+    ("waiter", "spawn count, then block in wait() until it exits and reap its status"),
     ("nx", "execute code from the stack -> NX page fault -> killed"),
     ("selfmod", "overwrite own code page -> W^X page fault -> killed"),
     ("bint", "200k getpid calls via int 0x80; exit status = ticks taken"),
@@ -855,6 +929,7 @@ pub fn builtin(name: &str) -> Option<&'static [u8]> {
         "producer" => blob!(user_producer_start, user_producer_end),
         "consumer" => blob!(user_consumer_start, user_consumer_end),
         "launcher" => blob!(user_launcher_start, user_launcher_end),
+        "waiter" => blob!(user_waiter_start, user_waiter_end),
         "nx" => blob!(user_nx_start, user_nx_end),
         "selfmod" => blob!(user_selfmod_start, user_selfmod_end),
         "bint" => blob!(user_bint_start, user_bint_end),
@@ -881,6 +956,9 @@ const MAX_PROCS: usize = 4;
 
 struct Proc {
     tid: usize,
+    /// 0 = launched by the shell; otherwise the tid of the process that
+    /// called `spawn` to create this one.
+    parent: usize,
     name: String,
     code_len: usize,
     pml4: PhysFrame,
@@ -951,6 +1029,7 @@ fn build_inner(
     name: &str,
     code: &[u8],
     args: &str,
+    parent: usize,
 ) -> Result<Box<Proc>, &'static str> {
     let mut base = USER_BASE.load(Ordering::SeqCst);
     if base == 0 {
@@ -1006,6 +1085,7 @@ fn build_inner(
 
     Ok(Box::new(Proc {
         tid: 0,
+        parent,
         name: String::from(name),
         code_len: code.len(),
         pml4,
@@ -1019,10 +1099,10 @@ fn build_inner(
 }
 
 /// Build a complete address space + process record for `code`.
-fn build_process(name: &str, code: &[u8], args: &str) -> Result<Box<Proc>, &'static str> {
+fn build_process(name: &str, code: &[u8], args: &str, parent: usize) -> Result<Box<Proc>, &'static str> {
     crate::memory::with_mem(|kmapper, frames| {
         let mut track = Track { inner: frames, got: Vec::new() };
-        match build_inner(kmapper, &mut track, name, code, args) {
+        match build_inner(kmapper, &mut track, name, code, args, parent) {
             Ok(mut p) => {
                 p.frames = core::mem::take(&mut track.got);
                 Ok(p)
@@ -1200,6 +1280,7 @@ extern "C" fn syscall_dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u
         SYS_SEND => sys_send(a1, a2, a3, a4),
         SYS_RECV => sys_recv(a1, a2, a3, a4),
         SYS_SPAWN => sys_spawn(a1, a2, a3, a4),
+        SYS_WAIT => sys_wait(a1, a2),
         _ => u64::MAX, // ENOSYS
     }
 }
@@ -1431,6 +1512,7 @@ fn sys_recv(np: u64, nl: u64, bp: u64, bl: u64) -> u64 {
 /// its own address space and runs independently -- the caller is NOT its
 /// parent in any special sense (no wait/reap here yet, see the limits below).
 fn sys_spawn(np: u64, nl: u64, ap: u64, al: u64) -> u64 {
+    let parent = crate::scheduler::current_id();
     let name = match user_str(np, nl) {
         Some(n) if !n.is_empty() => n,
         _ => return u64::MAX,
@@ -1450,9 +1532,77 @@ fn sys_spawn(np: u64, nl: u64, ap: u64, al: u64) -> u64 {
             None => return u64::MAX,
         },
     };
-    match spawn_bytes(&name, code, &args) {
+    match spawn_bytes(&name, code, &args, parent) {
         Ok(id) => id as u64,
         Err(_) => u64::MAX,
+    }
+}
+
+// --- wait / reap: a parent can block until a child it spawned finishes -------
+//
+// `user_thread`'s teardown removes the finished process's `Proc` record (its
+// address space is gone) but first drops a small receipt here: enough for a
+// parent to learn how a child it `spawn`ed ended, without needing the child's
+// full (freed) state. Records are capped; if a parent never waits, its
+// children's receipts are pruned oldest-first rather than growing forever.
+
+const MAX_EXIT_RECORDS: usize = 32;
+
+struct ExitRecord {
+    pid: usize,
+    parent: usize,
+    /// Exit code, or `FAULT_STATUS` if the process was killed by a fault.
+    status: u64,
+}
+
+static EXITED: Mutex<Vec<ExitRecord>> = Mutex::new(Vec::new());
+
+fn record_exit(pid: usize, parent: usize, status: u64) {
+    if parent == 0 {
+        return; // launched by the shell: nobody is waiting for it
+    }
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut ex = EXITED.lock();
+        if ex.len() >= MAX_EXIT_RECORDS {
+            ex.remove(0);
+        }
+        ex.push(ExitRecord { pid, parent, status });
+    });
+}
+
+/// wait(pid_filter, status_out_ptr) -> pid that finished, or -1.
+///
+/// `pid_filter` 0 means "any child of mine"; a specific pid waits for just
+/// that one. If the calling process has no matching child (alive or already
+/// finished), returns -1 immediately rather than blocking forever. If
+/// `status_out_ptr` is non-zero, the exit status is written there as a u32
+/// (`0xFFFF_FFFF` means the child faulted rather than calling `exit`).
+fn sys_wait(pid_filter: u64, status_out: u64) -> u64 {
+    let me = crate::scheduler::current_id();
+    loop {
+        let found = x86_64::instructions::interrupts::without_interrupts(|| {
+            let mut ex = EXITED.lock();
+            let idx = ex
+                .iter()
+                .position(|r| r.parent == me && (pid_filter == 0 || r.pid as u64 == pid_filter));
+            idx.map(|i| ex.remove(i))
+        });
+        if let Some(r) = found {
+            if status_out != 0 && user_stack_ok(status_out, 4) {
+                copy_to_user(status_out, &(r.status as u32).to_le_bytes());
+            }
+            return r.pid as u64;
+        }
+        let has_child = x86_64::instructions::interrupts::without_interrupts(|| {
+            PROCS
+                .lock()
+                .iter()
+                .any(|p| p.parent == me && (pid_filter == 0 || p.tid as u64 == pid_filter))
+        });
+        if !has_child {
+            return u64::MAX; // no such child, alive or finished: don't block forever
+        }
+        crate::scheduler::sleep_ticks(1);
     }
 }
 
@@ -1562,11 +1712,13 @@ extern "C" fn user_thread(_: usize) {
     crate::println!("[user] pid {} '{}' -> ring 3 ({} bytes, private address space)", pid, name, len);
     crate::serial_println!("[user] pid {} '{}' -> ring 3 ({} bytes, private address space)", pid, name, len);
 
+    let parent = with_current(|p| p.parent).unwrap_or(0);
     let result = run_current();
-    match result {
+    match &result {
         Ok(Exit::Code(c)) => {
             crate::println!("[user] pid {} exited with status {}", pid, c);
             crate::serial_println!("[user] pid {} exited with status {}", pid, c);
+            record_exit(pid, parent, *c);
         }
         Ok(Exit::Fault(what, addr, rip)) => {
             crate::println!(
@@ -1577,6 +1729,7 @@ extern "C" fn user_thread(_: usize) {
                 "[user] pid {} KILLED: {} (addr/code {:#x}, rip {:#x}) - kernel unharmed",
                 pid, what, addr, rip
             );
+            record_exit(pid, parent, FAULT_STATUS);
         }
         Err(e) => {
             crate::println!("[user] could not run: {}", e);
@@ -1618,7 +1771,7 @@ fn init_once() {
 
 /// Start `code` as a user process: build its private address space, then start
 /// a kernel thread that will enter ring 3.
-pub fn spawn_bytes(name: &str, code: Vec<u8>, args: &str) -> Result<usize, &'static str> {
+pub fn spawn_bytes(name: &str, code: Vec<u8>, args: &str, parent: usize) -> Result<usize, &'static str> {
     if code.len() > CODE_BYTES as usize {
         return Err("program too large (max 16 KiB)");
     }
@@ -1627,7 +1780,7 @@ pub fn spawn_bytes(name: &str, code: Vec<u8>, args: &str) -> Result<usize, &'sta
     if x86_64::instructions::interrupts::without_interrupts(|| PROCS.lock().len()) >= MAX_PROCS {
         return Err("too many user programs running (max 4)");
     }
-    let proc_ = build_process(name, &code, args)?;
+    let proc_ = build_process(name, &code, args, parent)?;
     // Register the process and start its thread as one atomic step, so the
     // thread can never run before its record exists.
     Ok(x86_64::instructions::interrupts::without_interrupts(|| {
@@ -1642,7 +1795,7 @@ pub fn spawn_bytes(name: &str, code: Vec<u8>, args: &str) -> Result<usize, &'sta
 /// Start the named built-in program.
 pub fn spawn_builtin(name: &str, args: &str) -> Result<usize, &'static str> {
     let code = builtin(name).ok_or("no such program (try: run)")?;
-    spawn_bytes(name, code.to_vec(), args)
+    spawn_bytes(name, code.to_vec(), args, 0)
 }
 
 /// Write every built-in program into the filesystem as `<name>.axe`.
