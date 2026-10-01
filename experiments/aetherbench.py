@@ -182,8 +182,20 @@ def run_qemu(qemu, kernel_bin, data_img, serial_path, realtime, timeout, cpu=Non
     p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=err_file)
     last_size, last_change = -1, time.time()
+    last_poll = time.time()
     while p.poll() is None:
         time.sleep(2)
+        # A big gap between two 2-second polls means the HOST was asleep (e.g.
+        # Windows Modern Standby froze every process). That isn't the guest
+        # hanging: restart the stall clock. (Every "stall" in the first full
+        # experiment run turned out to be exactly this -- devlog 035.)
+        now = time.time()
+        if now - last_poll > 30:
+            with open(err_path + ".host_sleeps", "a") as hs:
+                hs.write(f"host paused ~{now - last_poll:.0f}s at {time.ctime(now)}\n")
+            last_change = now
+            t0 += now - last_poll   # don't charge host sleep against the timeout either
+        last_poll = now
         try:
             size = os.path.getsize(serial_path)
         except OSError:
@@ -196,6 +208,11 @@ def run_qemu(qemu, kernel_bin, data_img, serial_path, realtime, timeout, cpu=Non
                 kernel_elf = os.path.splitext(kernel_bin)[0].replace("bootimage-", "")
                 with open(stall_path, "w", encoding="utf-8") as f:
                     f.write(("STALLED" if stalled else "TIMEOUT") + f" after {time.time() - t0:.0f}s\n")
+                    f.write(monitor_dump(port, kernel_elf))
+                    # A second snapshot 20 s later tells "stuck" (same state)
+                    # apart from "progressing very slowly" (state moved on).
+                    time.sleep(20)
+                    f.write("\n\n=== SECOND SNAPSHOT, 20 s later ===\n")
                     f.write(monitor_dump(port, kernel_elf))
             p.kill()
             p.wait()

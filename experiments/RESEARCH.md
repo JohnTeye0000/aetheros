@@ -200,7 +200,11 @@ Devlog 035 has the details. The harness itself had to be debugged:
   from its configuration's median;
 * a **parser bug** silently dropped 1 row in 24;
 * kernel bugs (heap fragmentation, unreaped threads, an interrupt/allocator
-  deadlock) made long batches crash or hang. Each was found from the harness's
+  deadlock) made long batches crash or hang.
+* "stalls" that turned out to be the **host laptop entering Modern Standby**
+  (matched to the second against the Windows event log). Completed runs are
+  unaffected, because `-icount` guest time counts instructions. Interrupted
+  batches were rerun, and the harness now treats a host pause as a pause, not a hang. Each was found from the harness's
   own diagnostics.
 
 ## Threats to validity (read before believing any number)

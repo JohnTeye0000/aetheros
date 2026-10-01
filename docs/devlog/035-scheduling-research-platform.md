@@ -102,6 +102,21 @@ or killed long-running workloads.
    to the shell prompt (`aether> RESULT,...`), so the parser skipped it, losing
    1 row in 24 with no error. The parser now finds record tags anywhere in a line.
 
+7. **Stalls that weren't the kernel's fault.** Several batches "hung" over the
+   afternoon, always in different places, sometimes after the guest had
+   already printed `POWEROFF`. The stall dumps showed healthy guests
+   mid-computation. The Windows event log explained it: every stall matched a
+   **Modern Standby** episode to the second. For example, one batch's last
+   output was 13:27:47 against standby entry at 13:27:28, and the stall was
+   detected at 13:57:55, the exact second standby ended. The laptop had frozen
+   every process. Because guest time under `-icount` counts instructions, not
+   wall-clock time, completed runs are unaffected; interrupted batches were
+   rerun. The harness now recognises a host pause (a >30 s gap between its
+   2-second polls) and doesn't count it as a guest hang. A theory I tested
+   along the way, that PlainLang's SSE-heavy programs were losing register
+   state, came back negative: 2,160 SSE-checking processes under heavy host
+   load showed zero corruptions.
+
 None of these showed up in interactive use. They needed volume, repetition and
 an automated "is this number plausible?" step to surface. That's the strongest
 argument I have for building the measurement harness *before* chasing results.
