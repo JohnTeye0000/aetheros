@@ -1,0 +1,23 @@
+timing=icount shift=3,sleep=off
+cpu=default
+bin=C:\Users\USER\Downloads\programming roadmap\CLAUDE CODE\aetheros-kernel\target\x86_64-unknown-none\debug\bootimage-aetheros_kernel.bin
+
+# Compiler-derived hints: PlainLang programs compiled by plainaxe, each carrying
+# the hint plainhint inferred from its source. 10 seeds per configuration.
+#   pl_mixed : 2 x p_cpu + p_io + p_int          (hints the compiler gets right)
+#   pl_phase : 2 x p_cpu + p_phase               (behaviour changes mid-run; static hint = cpu)
+#   pl_trick : 2 x p_cpu + p_trick + p_int       (classifier misreads a while loop; hint = interactive, truth ~ io)
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_io.axe+p_int.axe rr
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_io.axe+p_int.axe mlfq
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_io.axe+p_int.axe hint
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_io.axe+p_int.axe hmlfq
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_io.axe+p_int.axe hint hints=wrong
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_phase.axe rr
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_phase.axe mlfq
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_phase.axe hint
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_phase.axe hmlfq
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_trick.axe+p_int.axe rr
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_trick.axe+p_int.axe mlfq
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_trick.axe+p_int.axe hint
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_trick.axe+p_int.axe hmlfq
+poweroff

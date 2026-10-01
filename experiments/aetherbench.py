@@ -123,23 +123,27 @@ def monitor_dump(port, kernel_elf):
         s = socket.create_connection(("127.0.0.1", port), timeout=5)
         s.settimeout(2)
         def cmd(c):
+            """Send a monitor command; read until the next (qemu) prompt."""
             s.sendall((c + "\n").encode())
-            time.sleep(0.7)
             buf = b""
-            try:
-                while True:
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                try:
                     chunk = s.recv(65536)
-                    if not chunk:
-                        break
-                    buf += chunk
-            except OSError:
-                pass
-            return buf.decode("utf-8", "replace")
+                except OSError:
+                    continue
+                if not chunk:
+                    break
+                buf += chunk
+                if buf.rstrip().endswith(b"(qemu)"):
+                    break
+            # the monitor echoes keystrokes with terminal escape codes: strip them
+            return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", buf.decode("utf-8", "replace"))
         cmd("")
         regs = cmd("info registers")
         out.append(regs)
         out.append(cmd("x/12i $pc"))
-        out.append(cmd("x/48gx $rsp"))
+        out.append(cmd("x/400gx $rsp"))
         s.close()
         syms = elf_symbols(kernel_elf)
         m = re.search(r"RIP=([0-9a-f]+)", regs)

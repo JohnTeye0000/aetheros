@@ -1,0 +1,26 @@
+timing=icount shift=3,sleep=off
+cpu=default
+bin=C:\Users\USER\Downloads\programming roadmap\CLAUDE CODE\aetheros-kernel\target\x86_64-unknown-none\debug\bootimage-aetheros_kernel.bin
+
+# quantum sweep on workload 'all', 5 seeds each
+repeat 5 bench all rr q=2
+repeat 5 bench all mlfq q=2
+repeat 5 bench all hint q=2
+repeat 5 bench all hmlfq q=2
+repeat 5 bench all rr q=5
+repeat 5 bench all mlfq q=5
+repeat 5 bench all hint q=5
+repeat 5 bench all hmlfq q=5
+repeat 5 bench all rr q=10
+repeat 5 bench all mlfq q=10
+repeat 5 bench all hint q=10
+repeat 5 bench all hmlfq q=10
+repeat 5 bench all rr q=20
+repeat 5 bench all mlfq q=20
+repeat 5 bench all hint q=20
+repeat 5 bench all hmlfq q=20
+repeat 5 bench all rr q=50
+repeat 5 bench all mlfq q=50
+repeat 5 bench all hint q=50
+repeat 5 bench all hmlfq q=50
+poweroff

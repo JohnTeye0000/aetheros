@@ -1,0 +1,3 @@
+booting QEMU (icount)...
+TIMED OUT in 1324.6s host time: 80 benchmark runs, 320 process results
+  (see experiments/results/main_all\serial.log )

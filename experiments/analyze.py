@@ -270,7 +270,8 @@ def hint_quality_plot(data, out):
     cfgs = [c for c in data if c[1] in ("hint", "hmlfq")]
     if not any(c[2] != "on" for c in cfgs):
         return
-    workloads = sorted({c[0] for c in cfgs})
+    # only workloads that were actually run with missing/wrong hints
+    workloads = sorted({c[0] for c in cfgs if c[2] != "on"})
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     for ax, metric, label in ((axes[0], "interactive_lat_p95_ms", "interactive p95 latency (ms)"),
                               (axes[1], "cpu_turnaround_ms", "cpu-bound turnaround (ms)")):
