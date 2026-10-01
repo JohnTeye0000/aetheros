@@ -1,11 +1,5 @@
 //! Preemptive multitasking: kernel threads switched by the timer interrupt.
 //!
-//! Stage 6's executor was *cooperative*: a task ran until it chose to
-//! `yield_now().await`. A task that never yielded would hog the CPU forever.
-//! Here the kernel takes the CPU away by force: every timer tick, whatever
-//! thread is running gets suspended and the next ready thread resumes, whether
-//! or not either one ever asked for it.
-//!
 //! ## How a context switch works
 //!
 //! A thread's entire "state" while it isn't running is: its own stack, plus
@@ -21,8 +15,8 @@
 //!   * **preempted** — the timer interrupt handler calls `on_tick`, so the
 //!     thread is parked mid-interrupt, and resumes by finishing the handler and
 //!     `iretq`-ing to the instruction the timer interrupted;
-//!   * **voluntarily** — the thread itself calls `sleep_ticks`, which calls
-//!     `switch_context` directly and resumes by simply returning.
+//!   * **voluntarily** — the thread calls `sleep_ticks` or `block_current`,
+//!     which call `switch_context` directly; it resumes by simply returning.
 //!
 //! ## Brand-new threads
 //!
@@ -31,30 +25,70 @@
 //! callee-saved slots and a return address pointing at `thread_start`, which
 //! enables interrupts and calls the thread's entry function.
 //!
-//! ## Lifecycle
+//! ## Policies (Stage 35)
 //!
-//! `Ready`/`Running` threads take turns. `sleep_ticks` parks a thread as
-//! `Sleeping` until a wake-up tick; `kill` marks a thread `Dead`; `reap` frees
-//! the stacks of dead threads (never the one currently executing).
+//! Which ready thread runs next is decided by a pluggable **policy**, so the
+//! same kernel can be measured under different scheduling rules:
+//!
+//! | policy  | priority comes from            | quantum             |
+//! |---------|--------------------------------|---------------------|
+//! | `rr`    | nobody: plain round robin      | Q for everyone      |
+//! | `hint`  | the program's declared hint    | Q << level          |
+//! | `mlfq`  | observed behaviour (MLFQ)      | Q << level          |
+//! | `hmlfq` | hint as MLFQ's starting level  | Q << level          |
+//!
+//! `hint` uses only *static* information (what the program says it is);
+//! `mlfq` uses only *runtime* information (what the program has been doing —
+//! threads that burn whole quanta sink, threads that block stay high);
+//! `hmlfq` combines them. Both `hint` and the MLFQs include an anti-starvation
+//! rule (aging / periodic boost), and both are stated in the constants below.
+//!
+//! Thread 0 (`kernel_main`, sitting in a `hlt` loop) is the **idle thread**: it
+//! only runs when nothing else is ready, so it never steals a time slice.
+//!
+//! ## Accounting
+//!
+//! Every thread records, in TSC cycles: when it was created, when it first
+//! ran, total CPU time, total time spent ready-but-not-running, and a sample
+//! of **wake-up latency** (time from being woken to actually running) for every
+//! wake-up. These feed the benchmark harness in `bench.rs`.
 
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
 use x86_64::instructions::interrupts;
+
+use crate::timing;
 
 /// Each thread gets its own stack. The shell runs *on whichever thread's stack
 /// was interrupted*, so this has to be big enough for `format!` and friends.
 const STACK_SIZE: usize = 32 * 1024;
+
+/// Wake-up latency samples kept per thread (oldest kept, extras dropped).
+const MAX_LAT_SAMPLES: usize = 4096;
+
+/// Number of priority levels for the multi-level policies.
+const LEVELS: u8 = 3;
+
+/// MLFQ: every BOOST_MS, all threads return to the top level (so CPU-bound
+/// threads can't starve forever, and a thread whose behaviour changed gets
+/// re-evaluated).
+const BOOST_MS: u64 = 200;
+
+/// `hint`: a thread that has been ready-but-not-running for AGING_MS is treated
+/// as top priority until it runs (so a CPU-bound thread can't starve forever).
+const AGING_MS: u64 = 100;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
     Running,
     Ready,
     Sleeping,
+    Blocked,
     Dead,
 }
 
@@ -64,12 +98,134 @@ impl State {
             State::Running => "running",
             State::Ready => "ready",
             State::Sleeping => "sleeping",
+            State::Blocked => "blocked",
             State::Dead => "dead",
         }
     }
 }
 
+/// What a program says about itself (Stage 35: carried in the program header).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Hint {
+    None,
+    Cpu,
+    Io,
+    Interactive,
+}
+
+impl Hint {
+    pub fn name(self) -> &'static str {
+        match self {
+            Hint::None => "none",
+            Hint::Cpu => "cpu",
+            Hint::Io => "io",
+            Hint::Interactive => "interactive",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Hint> {
+        Some(match s {
+            "none" => Hint::None,
+            "cpu" => Hint::Cpu,
+            "io" => Hint::Io,
+            "interactive" => Hint::Interactive,
+            _ => return None,
+        })
+    }
+    /// Priority level a hint maps to (0 = highest).
+    fn level(self) -> u8 {
+        match self {
+            Hint::Interactive => 0,
+            Hint::Io | Hint::None => 1,
+            Hint::Cpu => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Policy {
+    RoundRobin,
+    Hinted,
+    Mlfq,
+    HintedMlfq,
+}
+
+impl Policy {
+    pub fn name(self) -> &'static str {
+        match self {
+            Policy::RoundRobin => "rr",
+            Policy::Hinted => "hint",
+            Policy::Mlfq => "mlfq",
+            Policy::HintedMlfq => "hmlfq",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Policy> {
+        Some(match s {
+            "rr" => Policy::RoundRobin,
+            "hint" => Policy::Hinted,
+            "mlfq" => Policy::Mlfq,
+            "hmlfq" => Policy::HintedMlfq,
+            _ => return None,
+        })
+    }
+    fn from_u8(v: u8) -> Policy {
+        match v {
+            1 => Policy::Hinted,
+            2 => Policy::Mlfq,
+            3 => Policy::HintedMlfq,
+            _ => Policy::RoundRobin,
+        }
+    }
+    fn to_u8(self) -> u8 {
+        match self {
+            Policy::RoundRobin => 0,
+            Policy::Hinted => 1,
+            Policy::Mlfq => 2,
+            Policy::HintedMlfq => 3,
+        }
+    }
+}
+
+static POLICY: AtomicU8 = AtomicU8::new(0);
+/// Base quantum in timer ticks (1 tick = 1 ms).
+static QUANTUM: AtomicU64 = AtomicU64::new(10);
+
+static CTX_SWITCHES: AtomicU64 = AtomicU64::new(0);
+static SCHED_CYCLES: AtomicU64 = AtomicU64::new(0);
+static LAST_BOOST: AtomicU64 = AtomicU64::new(0);
+
+pub fn policy() -> Policy {
+    Policy::from_u8(POLICY.load(Ordering::Relaxed))
+}
+pub fn set_policy(p: Policy) {
+    POLICY.store(p.to_u8(), Ordering::SeqCst);
+}
+pub fn quantum_ms() -> u64 {
+    QUANTUM.load(Ordering::Relaxed)
+}
+pub fn set_quantum_ms(q: u64) {
+    QUANTUM.store(q.clamp(1, 1000), Ordering::SeqCst);
+}
+/// Context switches performed since the last `reset_counters`.
+pub fn ctx_switches() -> u64 {
+    CTX_SWITCHES.load(Ordering::Relaxed)
+}
+/// TSC cycles spent inside the scheduler's decision code since the last reset.
+pub fn sched_cycles() -> u64 {
+    SCHED_CYCLES.load(Ordering::Relaxed)
+}
+pub fn reset_counters() {
+    CTX_SWITCHES.store(0, Ordering::SeqCst);
+    SCHED_CYCLES.store(0, Ordering::SeqCst);
+}
+
+/// The 512-byte area `fxsave`/`fxrstor` use for the x87/MMX/SSE registers.
+/// The CPU requires 16-byte alignment.
+#[repr(C, align(16))]
+struct FxArea([u8; 512]);
+
 struct Thread {
+    /// This thread's floating-point/SSE registers while it isn't running.
+    fx: Box<FxArea>,
     id: usize,
     name: String,
     state: State,
@@ -79,9 +235,76 @@ struct Thread {
     switches_in: u64,
     /// For `Sleeping` threads: the timer tick at which to wake up.
     wake_tick: u64,
+    /// For `Blocked` threads: what they're waiting for (see `wake_all`).
+    block_key: u64,
     /// The thread's stack. `None` for the boot thread, which keeps using the
     /// stack the bootloader gave it.
     _stack: Option<Box<[u8]>>,
+
+    // --- policy state ---
+    hint: Hint,
+    /// The benchmark harness's own threads (launcher, autorun): always run
+    /// first when ready, under every policy, so no workload can delay when
+    /// another workload process is launched (see devlog 035).
+    system: bool,
+    level: u8,
+    /// Ticks used since this thread was last dispatched.
+    slice_used: u64,
+    /// MLFQ: ticks used at the current level (survives blocking, so a thread
+    /// can't stay high just by yielding right before its quantum ends).
+    used_at_level: u64,
+
+    // --- accounting, in TSC cycles ---
+    created: u64,
+    first_run: u64,
+    dispatched_at: u64,
+    cpu: u64,
+    ready_since: u64,
+    waited: u64,
+    /// This Ready period started with a wake-up (sleep/block ended), so its
+    /// length is a wake-up latency sample.
+    woke: bool,
+    preempts: u64,
+    blocks: u64,
+    lat: Vec<u64>,
+}
+
+impl Thread {
+    fn new(id: usize, name: &str, state: State, saved_rsp: usize, stack: Option<Box<[u8]>>) -> Thread {
+        let now = timing::now();
+        Thread {
+            fx: Box::new(FxArea([0; 512])),
+            id,
+            name: String::from(name),
+            state,
+            saved_rsp,
+            switches_in: 0,
+            wake_tick: 0,
+            block_key: 0,
+            _stack: stack,
+            hint: Hint::None,
+            system: false,
+            level: 0,
+            slice_used: 0,
+            used_at_level: 0,
+            created: now,
+            first_run: 0,
+            dispatched_at: 0,
+            cpu: 0,
+            ready_since: now,
+            waited: 0,
+            woke: false,
+            preempts: 0,
+            blocks: 0,
+            lat: Vec::new(),
+        }
+    }
+
+    fn make_ready(&mut self, now: u64, woke: bool) {
+        self.state = State::Ready;
+        self.ready_since = now;
+        self.woke = woke;
+    }
 }
 
 struct Scheduler {
@@ -149,19 +372,34 @@ extern "C" fn thread_exit_trampoline() -> ! {
     exit_current()
 }
 
-/// Adopt the currently-running code (`kernel_main`) as thread 0.
+/// Let user programs use SSE (Stage 36). CR0.EM=0 (no x87 emulation trap),
+/// CR0.MP=1, CR4.OSFXSR=1 (the OS saves SSE state with fxsave/fxrstor),
+/// CR4.OSXMMEXCPT=1 (SIMD float exceptions are reported, not #UD).
+fn enable_sse() {
+    use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
+    unsafe {
+        Cr0::update(|f| {
+            f.remove(Cr0Flags::EMULATE_COPROCESSOR);
+            f.insert(Cr0Flags::MONITOR_COPROCESSOR);
+        });
+        Cr4::update(|f| {
+            f.insert(Cr4Flags::OSFXSR);
+            f.insert(Cr4Flags::OSXMMEXCPT_ENABLE);
+        });
+    }
+}
+
+/// Adopt the currently-running code (`kernel_main`) as thread 0, the idle
+/// thread.
 pub fn init() {
+    enable_sse();
     interrupts::without_interrupts(|| {
         let mut s = SCHED.lock();
-        s.threads.push(Box::new(Thread {
-            id: 0,
-            name: String::from("kernel_main"),
-            state: State::Running,
-            saved_rsp: 0,
-            switches_in: 0,
-            wake_tick: 0,
-            _stack: None,
-        }));
+        let mut t = Thread::new(0, "kernel_main", State::Running, 0, None);
+        let now = timing::now();
+        t.first_run = now;
+        t.dispatched_at = now;
+        s.threads.push(Box::new(t));
         s.current = 0;
     });
 }
@@ -169,6 +407,21 @@ pub fn init() {
 /// Create a new thread that will start running `entry(arg)` the next time the
 /// scheduler picks it. Returns its id.
 pub fn spawn(name: &str, entry: extern "C" fn(usize), arg: usize) -> usize {
+    spawn_inner(name, entry, arg, false)
+}
+
+/// Like `spawn`, but the thread is a *system* thread: whenever it is ready it
+/// runs before any ordinary thread, whatever the policy.
+pub fn spawn_system(name: &str, entry: extern "C" fn(usize), arg: usize) -> usize {
+    spawn_inner(name, entry, arg, true)
+}
+
+fn spawn_inner(name: &str, entry: extern "C" fn(usize), arg: usize, system: bool) -> usize {
+    // Free the stacks of threads that have finished since the last spawn.
+    // (Stage 35 fix: reaping used to happen only on `ps`/`kill`, so a long
+    // benchmark leaked a 32 KiB stack per finished process until the heap ran
+    // out.)
+    reap();
     let stack: Box<[u8]> = vec![0u8; STACK_SIZE].into_boxed_slice();
     let top = (stack.as_ptr() as usize + STACK_SIZE) & !0xF;
 
@@ -194,81 +447,282 @@ pub fn spawn(name: &str, entry: extern "C" fn(usize), arg: usize) -> usize {
         let id = s.next_id;
         s.next_id += 1;
         PROGRESS[id % PROGRESS_SLOTS].store(0, Ordering::Relaxed);
-        s.threads.push(Box::new(Thread {
-            id,
-            name: String::from(name),
-            state: State::Ready,
-            saved_rsp: rsp,
-            switches_in: 0,
-            wake_tick: 0,
-            _stack: Some(stack),
-        }));
+        let mut t = Thread::new(id, name, State::Ready, rsp, Some(stack));
+        t.system = system;
+        s.threads.push(Box::new(t));
         id
     })
 }
 
-/// Pick the next ready thread (round-robin from the current one) and switch to
-/// it. Interrupts must already be disabled. Wakes any sleepers whose time has
-/// come first. If nothing else is ready, returns and the caller keeps running.
-fn schedule() {
-    let now = crate::interrupts::ticks();
-    let (old_ptr, new_rsp, next_id) = {
+/// Record what a thread says it is. Call before it first runs (`spawn_bytes`
+/// does this inside the same interrupts-off section that spawns it).
+pub fn set_hint(id: usize, hint: Hint) {
+    interrupts::without_interrupts(|| {
         let mut s = SCHED.lock();
-        for t in s.threads.iter_mut() {
-            if t.state == State::Sleeping && t.wake_tick <= now {
-                t.state = State::Ready;
+        if let Some(t) = s.threads.iter_mut().find(|t| t.id == id) {
+            t.hint = hint;
+            t.level = if policy() == Policy::HintedMlfq { hint.level() } else { 0 };
+        }
+    });
+}
+
+fn quantum_for(pol: Policy, level: u8) -> u64 {
+    let q = quantum_ms();
+    match pol {
+        Policy::RoundRobin => q,
+        _ => q << level,
+    }
+}
+
+/// The priority level the policy assigns this thread right now (0 = highest).
+fn eff_level(t: &Thread, pol: Policy, now: u64) -> u8 {
+    match pol {
+        Policy::RoundRobin => 0,
+        Policy::Hinted => {
+            let aging = AGING_MS * timing::tsc_hz() / 1000;
+            if t.state == State::Ready && aging > 0 && now.saturating_sub(t.ready_since) > aging {
+                0
+            } else {
+                t.hint.level()
             }
         }
-        let n = s.threads.len();
-        if n < 2 {
+        Policy::Mlfq | Policy::HintedMlfq => t.level,
+    }
+}
+
+/// Overall rank (lower runs first): system threads above everything, then
+/// the policy's own levels.
+fn rank(t: &Thread, pol: Policy, now: u64) -> u8 {
+    if t.system {
+        0
+    } else {
+        1 + eff_level(t, pol, now)
+    }
+}
+
+/// Choose who runs next: the best (lowest) rank among ready threads, ties
+/// broken round-robin starting just after the current thread. The current
+/// thread competes too if it is still runnable, but comes *last* in the
+/// rotation. Thread 0 (idle) is never chosen here.
+fn pick(s: &Scheduler, pol: Policy, now: u64) -> Option<usize> {
+    let n = s.threads.len();
+    let cur = s.current;
+    let mut best: Option<(u8, usize)> = None;
+    for k in 1..=n {
+        let i = (cur + k) % n;
+        let t = &s.threads[i];
+        if t.id == 0 {
+            continue;
+        }
+        let runnable = t.state == State::Ready || (i == cur && t.state == State::Running);
+        if !runnable {
+            continue;
+        }
+        let lvl = rank(t, pol, now);
+        if best.map_or(true, |(b, _)| lvl < b) {
+            best = Some((lvl, i));
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
+/// Switch to whoever should run now. Interrupts must already be disabled. If
+/// the current thread is still the best choice it simply keeps running with a
+/// fresh time slice.
+fn schedule() {
+    let t0 = timing::now();
+    let pol = policy();
+    let old_fx: *mut FxArea;
+    let (old_ptr, new_rsp, next_id) = {
+        let mut s = SCHED.lock();
+        let cur = s.current;
+        let next = match pick(&s, pol, t0) {
+            Some(i) => i,
+            None if s.threads[cur].state == State::Running => {
+                // Nothing else to run (current may be the idle thread).
+                s.threads[cur].slice_used = 0;
+                drop(s);
+                SCHED_CYCLES.fetch_add(timing::now() - t0, Ordering::Relaxed);
+                return;
+            }
+            None => 0, // current is blocked/sleeping/dead: run the idle thread
+        };
+        if next == cur {
+            s.threads[cur].slice_used = 0;
+            drop(s);
+            SCHED_CYCLES.fetch_add(timing::now() - t0, Ordering::Relaxed);
             return;
         }
-        let cur = s.current;
-        let next = match (1..=n)
-            .map(|i| (cur + i) % n)
-            .find(|&i| s.threads[i].state == State::Ready)
+
         {
-            Some(i) => i,
-            None => return, // nothing else to run
-        };
-        if s.threads[cur].state == State::Running {
-            s.threads[cur].state = State::Ready;
+            let c = &mut s.threads[cur];
+            c.cpu += t0.saturating_sub(c.dispatched_at);
+            if c.state == State::Running {
+                c.make_ready(t0, false);
+                c.preempts += 1;
+            }
         }
-        s.threads[next].state = State::Running;
-        s.threads[next].switches_in += 1;
+        {
+            let t = &mut s.threads[next];
+            let waited = t0.saturating_sub(t.ready_since);
+            t.waited += waited;
+            if t.woke && t.lat.len() < MAX_LAT_SAMPLES {
+                t.lat.push(waited);
+            }
+            t.woke = false;
+            if t.first_run == 0 {
+                t.first_run = t0;
+            }
+            t.dispatched_at = t0;
+            t.slice_used = 0;
+            t.state = State::Running;
+            t.switches_in += 1;
+        }
         s.current = next;
         let old_ptr = &mut s.threads[cur].saved_rsp as *mut usize;
+        old_fx = &mut *s.threads[cur].fx as *mut FxArea;
         (old_ptr, s.threads[next].saved_rsp, s.threads[next].id)
     }; // lock released BEFORE switching: the thread we switch to will want it
+    CTX_SWITCHES.fetch_add(1, Ordering::Relaxed);
+    SCHED_CYCLES.fetch_add(timing::now() - t0, Ordering::Relaxed);
     // Give the incoming thread its own address space (user processes have
     // private page tables) and kernel-entry stack before we run it.
     crate::usermode::on_switch_to(next_id);
-    unsafe { switch_context(old_ptr, new_rsp) };
+    // The kernel itself is compiled without SSE (soft-float), so the only
+    // floating-point state in the registers belongs to user programs. Save
+    // ours before leaving; restore it when we are switched back to (brand-new
+    // threads never return here -- they get a clean state in `enter_user`).
+    unsafe {
+        core::arch::asm!("fxsave64 [{}]", in(reg) old_fx, options(nostack, preserves_flags));
+        switch_context(old_ptr, new_rsp);
+        core::arch::asm!("fxrstor64 [{}]", in(reg) old_fx, options(nostack, preserves_flags));
+    }
 }
 
 /// Called from the timer interrupt handler (interrupts already disabled, EOI
-/// already sent): preempt the running thread.
+/// already sent): wake due sleepers, charge the running thread for this tick,
+/// and switch if its slice is used up or someone more urgent is ready.
 pub fn on_tick() {
-    schedule();
+    let now_tick = crate::interrupts::ticks();
+    let now = timing::now();
+    let pol = policy();
+    let need = {
+        let mut s = SCHED.lock();
+        if s.threads.is_empty() {
+            return; // timer runs from boot; the scheduler starts later
+        }
+        for t in s.threads.iter_mut() {
+            if t.state == State::Sleeping && t.wake_tick <= now_tick {
+                t.make_ready(now, true);
+            }
+        }
+        if matches!(pol, Policy::Mlfq | Policy::HintedMlfq)
+            && now_tick.saturating_sub(LAST_BOOST.load(Ordering::Relaxed)) >= BOOST_MS
+        {
+            LAST_BOOST.store(now_tick, Ordering::Relaxed);
+            for t in s.threads.iter_mut() {
+                t.level = 0;
+                t.used_at_level = 0;
+            }
+        }
+        let cur = s.current;
+        let cur_state = s.threads[cur].state;
+        if cur_state != State::Running {
+            true
+        } else if s.threads[cur].id == 0 {
+            // Idle: switch as soon as anything is ready.
+            s.threads.iter().any(|t| t.id != 0 && t.state == State::Ready)
+        } else {
+            let mut expired = false;
+            {
+                let c = &mut s.threads[cur];
+                c.slice_used += 1;
+                c.used_at_level += 1;
+                if matches!(pol, Policy::Mlfq | Policy::HintedMlfq)
+                    && !c.system
+                    && c.used_at_level >= quantum_for(pol, c.level)
+                {
+                    // Used its whole allotment at this level: CPU-bound
+                    // behaviour, so it sinks one level.
+                    if c.level + 1 < LEVELS {
+                        c.level += 1;
+                    }
+                    c.used_at_level = 0;
+                    expired = true;
+                }
+            }
+            let my_level = eff_level(&s.threads[cur], pol, now);
+            if s.threads[cur].slice_used >= quantum_for(pol, my_level) {
+                expired = true;
+            }
+            // Someone more urgent ready? Under round robin only a system
+            // thread counts (round robin has no priorities of its own).
+            let my_rank = rank(&s.threads[cur], pol, now);
+            let more_urgent = s.threads.iter().any(|t| {
+                t.id != 0
+                    && t.state == State::Ready
+                    && (pol != Policy::RoundRobin || t.system)
+                    && rank(t, pol, now) < my_rank
+            });
+            expired || more_urgent
+        }
+    };
+    if need {
+        schedule();
+    }
 }
 
-/// Block the calling thread for `ticks` timer ticks (~55 ms each) and let
-/// other threads run in the meantime. Unlike spinning, a sleeping thread uses
-/// no CPU at all until its wake-up tick.
+/// Block the calling thread for `ticks` timer ticks (1 ms each) and let other
+/// threads run in the meantime. A sleeping thread uses no CPU at all until its
+/// wake-up tick.
 pub fn sleep_ticks(ticks: u64) {
     interrupts::without_interrupts(|| {
         {
             let mut s = SCHED.lock();
             let c = s.current;
             s.threads[c].state = State::Sleeping;
-            s.threads[c].wake_tick = crate::interrupts::ticks() + ticks;
+            s.threads[c].wake_tick = crate::interrupts::ticks() + ticks.max(1);
+            s.threads[c].blocks += 1;
         }
-        // We are no longer Running, so `schedule` will pick someone else and we
-        // resume — right here — once a later tick has woken us and the
-        // scheduler rotates back around to us.
         schedule();
     });
-    // (`without_interrupts` restores the interrupt flag on the way out.)
+}
+
+/// Block the calling thread until someone calls `wake_all(key)`.
+///
+/// The caller must check its wait condition and call this **in the same
+/// interrupts-disabled section** — then no wake-up can slip in between "I see
+/// nothing to do" and "I'm blocked" (on one CPU, nothing else runs while
+/// interrupts are off). After waking, re-check the condition: a wake-up means
+/// "something changed", not "your thing is definitely there".
+pub fn block_current(key: u64) {
+    interrupts::without_interrupts(|| {
+        {
+            let mut s = SCHED.lock();
+            let c = s.current;
+            s.threads[c].state = State::Blocked;
+            s.threads[c].block_key = key;
+            s.threads[c].blocks += 1;
+        }
+        schedule();
+    });
+}
+
+/// Make every thread blocked on `key` ready. Returns how many woke. Safe from
+/// interrupt handlers.
+pub fn wake_all(key: u64) -> usize {
+    interrupts::without_interrupts(|| {
+        let now = timing::now();
+        let mut s = SCHED.lock();
+        let mut n = 0;
+        for t in s.threads.iter_mut() {
+            if t.state == State::Blocked && t.block_key == key {
+                t.make_ready(now, true);
+                n += 1;
+            }
+        }
+        n
+    })
 }
 
 /// Is there a live (not dead) thread with this id?
@@ -290,12 +744,15 @@ pub fn current_id() -> usize {
     })
 }
 
-/// Mark the current thread finished. The scheduler never resumes it again.
+/// Mark the current thread finished and switch away for good.
 pub fn exit_current() -> ! {
     interrupts::without_interrupts(|| {
-        let mut s = SCHED.lock();
-        let c = s.current;
-        s.threads[c].state = State::Dead;
+        {
+            let mut s = SCHED.lock();
+            let c = s.current;
+            s.threads[c].state = State::Dead;
+        }
+        schedule();
     });
     loop {
         x86_64::instructions::hlt();
@@ -352,29 +809,94 @@ pub struct ThreadInfo {
     pub state: State,
     pub switches: u64,
     pub wake_in: u64,
+    pub level: u8,
+    pub hint: Hint,
+    pub cpu_us: u64,
 }
 
 pub fn snapshot() -> Vec<ThreadInfo> {
     reap();
-    let now = crate::interrupts::ticks();
+    let now_tick = crate::interrupts::ticks();
+    let now = timing::now();
     interrupts::without_interrupts(|| {
-        SCHED
-            .lock()
-            .threads
+        let s = SCHED.lock();
+        let cur = s.current;
+        s.threads
             .iter()
-            .map(|t| ThreadInfo {
+            .enumerate()
+            .map(|(i, t)| ThreadInfo {
                 id: t.id,
                 name: t.name.clone(),
                 state: t.state,
                 switches: t.switches_in,
                 wake_in: if t.state == State::Sleeping {
-                    t.wake_tick.saturating_sub(now)
+                    t.wake_tick.saturating_sub(now_tick)
                 } else {
                     0
                 },
+                level: t.level,
+                hint: t.hint,
+                cpu_us: timing::cycles_to_us(
+                    t.cpu + if i == cur { now.saturating_sub(t.dispatched_at) } else { 0 },
+                ),
             })
             .collect()
     })
+}
+
+/// Final measurements for one thread (all times in microseconds).
+pub struct ThreadStats {
+    pub id: usize,
+    pub hint: Hint,
+    /// Created -> first ran.
+    pub response_us: u64,
+    /// Created -> now (call this when the work is done).
+    pub turnaround_us: u64,
+    pub cpu_us: u64,
+    /// Total time ready but not running.
+    pub wait_us: u64,
+    pub switches: u64,
+    pub preempts: u64,
+    pub blocks: u64,
+    /// Wake-up latencies, sorted ascending.
+    pub lat_us: Vec<u64>,
+}
+
+/// Snapshot the calling thread's statistics, up to this moment.
+pub fn current_stats() -> ThreadStats {
+    let now = timing::now();
+    let (id, hint, created, first, cpu, dispatched, waited, sw, pre, blk, lat) =
+        interrupts::without_interrupts(|| {
+            let s = SCHED.lock();
+            let t = &s.threads[s.current];
+            (
+                t.id,
+                t.hint,
+                t.created,
+                t.first_run,
+                t.cpu,
+                t.dispatched_at,
+                t.waited,
+                t.switches_in,
+                t.preempts,
+                t.blocks,
+                t.lat.clone(),
+            )
+        });
+    let mut lat_us: Vec<u64> = lat.into_iter().map(timing::cycles_to_us).collect();
+    lat_us.sort_unstable();
+    ThreadStats {
+        id,
+        hint,
+        response_us: timing::cycles_to_us(first.saturating_sub(created)),
+        turnaround_us: timing::cycles_to_us(now.saturating_sub(created)),
+        cpu_us: timing::cycles_to_us(cpu + now.saturating_sub(dispatched)),
+        wait_us: timing::cycles_to_us(waited),
+        switches: sw,
+        preempts: pre,
+        blocks: blk,
+        lat_us,
+    }
 }
 
 // --- demo thread bodies ---------------------------------------------------------
@@ -391,12 +913,12 @@ pub extern "C" fn spin_entry(_: usize) {
     }
 }
 
-/// A well-behaved background thread: sleeps ~1 second (18 ticks), wakes, logs,
-/// repeats. While it sleeps it costs nothing.
+/// A well-behaved background thread: sleeps 1 second, wakes, logs, repeats.
+/// While it sleeps it costs nothing.
 pub extern "C" fn ticker_entry(_: usize) {
     let id = current_id();
     loop {
-        sleep_ticks(18);
+        sleep_ticks(crate::interrupts::HZ);
         bump_progress();
         let n = progress(id);
         crate::println!("[ticker {}] woke up, beat #{} (tick {})", id, n, crate::interrupts::ticks());

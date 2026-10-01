@@ -1,0 +1,11 @@
+# I/O-style: a burst of work, then wait for "the device", 30 times.
+set total to 0
+repeat 30 times
+set s to 0
+count i from 1 to 10000
+set s to s plus i
+end
+set total to total plus s
+wait 0.004
+end
+say "processed " plus total

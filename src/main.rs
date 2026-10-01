@@ -33,6 +33,8 @@ mod scheduler;
 mod serial;
 mod shell;
 mod task;
+mod timing;
+mod bench;
 mod usermode;
 mod vga_buffer;
 use vga_buffer::Color;
@@ -221,6 +223,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         .lock()
         .set_color(Color::Yellow, Color::Black);
     boot_log!("[ sched ] adopting kernel_main as thread 0");
+    timing::calibrate(50);
+    boot_log!("[ time ] TSC calibrated: {} MHz (timer at {} Hz)", timing::tsc_hz() / 1_000_000, interrupts::HZ);
     scheduler::init();
     boot_log!("[ sched ] scheduler online - try: spawn ticker / spawn spin / ps / kill <id>");
     boot_log!("");
@@ -253,6 +257,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         .lock()
         .set_color(Color::White, Color::Black);
     shell::start();
+    // Stage 35: an `autorun` file (e.g. an experiment script) runs unattended,
+    // started only once boot output is finished so the two never interleave.
+    bench::autorun_start();
 
     // Idle in a halt loop: `hlt` stops the core until the next interrupt
     // (a keystroke or timer tick), so we sleep instead of burning 100% CPU.
@@ -281,5 +288,10 @@ fn panic(info: &PanicInfo) -> ! {
     println!("*** KERNEL PANIC ***");
     println!("{}", info);
     serial_println!("*** KERNEL PANIC: {}", info);
-    loop {}
+    if bench::autorun_active() {
+        bench::poweroff(); // unattended experiment: fail fast, don't hang
+    }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }

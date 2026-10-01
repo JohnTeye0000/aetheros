@@ -1,0 +1,5 @@
+# Smoke test: one run of each policy on the 'all' workload.
+bench all rr
+bench all hint
+bench all mlfq
+bench all hmlfq

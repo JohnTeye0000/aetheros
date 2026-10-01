@@ -140,14 +140,14 @@ fn dispatch(input: &str) {
         "" => {} // empty line — do nothing
         "help" => {
             out("commands:");
-            out("  help  echo  about  ticks  date  mem  ps  spawn  kill  run  exec  install  save  load  heaptest  cpuinfo  lspci  acpi  hpet  disk  clear  history  crash  pagefault");
+            out("  help  echo  about  ticks  date  mem  ps  spawn  kill  sched  bench  run  exec  install  save  load  heaptest  cpuinfo  lspci  acpi  hpet  disk  clear  history  crash  pagefault  poweroff");
             out("  ls  cat <f>  write <f> <txt>  rm <f>  cp <s> <d>  mv <s> <d>");
         }
         "echo" => out(args),
         "about" => out("AetherOS - a from-scratch x86-64 kernel in Rust."),
         "ticks" => {
             let t = crate::interrupts::ticks();
-            crate::println!("uptime: {} timer ticks (~{} s)", t, t / 18);
+            crate::println!("uptime: {} timer ticks (~{} s)", t, t / crate::interrupts::HZ);
             crate::serial_println!("uptime: {} timer ticks", t);
         }
         "date" => {
@@ -180,7 +180,13 @@ fn dispatch(input: &str) {
             // One row per thread. `progress` is a per-thread work counter: it
             // climbs for a CPU-hogging thread, and ticks once a second for a
             // sleeping ticker; state shows how many ticks a sleeper has left.
-            out("  id  name         state         switches  progress");
+            let line = alloc::format!(
+                "policy {}  quantum {} ms",
+                crate::scheduler::policy().name(),
+                crate::scheduler::quantum_ms()
+            );
+            out(&line);
+            out("  id  name         state         switches  lvl  hint         cpu_ms  progress");
             for t in crate::scheduler::snapshot() {
                 let state = if t.wake_in > 0 {
                     alloc::format!("sleeping({})", t.wake_in)
@@ -193,8 +199,8 @@ fn dispatch(input: &str) {
                     alloc::format!("{}", crate::scheduler::progress(t.id))
                 };
                 let line = alloc::format!(
-                    "{:>4}  {:<11}  {:<12}  {:>8}  {}",
-                    t.id, t.name, state, t.switches, progress
+                    "{:>4}  {:<11}  {:<12}  {:>8}  {:>3}  {:<11}  {:>6}  {}",
+                    t.id, t.name, state, t.switches, t.level, t.hint.name(), t.cpu_us / 1000, progress
                 );
                 out(&line);
             }
@@ -446,6 +452,43 @@ fn dispatch(input: &str) {
                 }
             }
         }
+        "sched" => {
+            let mut it = args.split_whitespace();
+            if let Some(p) = it.next() {
+                match crate::scheduler::Policy::parse(p) {
+                    Some(pol) => crate::scheduler::set_policy(pol),
+                    None => out("usage: sched [rr|hint|mlfq|hmlfq] [quantum_ms]"),
+                }
+            }
+            if let Some(q) = it.next() {
+                match q.parse::<u64>() {
+                    Ok(q) => crate::scheduler::set_quantum_ms(q),
+                    Err(_) => out("quantum must be a number of milliseconds"),
+                }
+            }
+            let line = alloc::format!(
+                "scheduler policy: {}  base quantum: {} ms  (policies: rr hint mlfq hmlfq)",
+                crate::scheduler::policy().name(),
+                crate::scheduler::quantum_ms()
+            );
+            out(&line);
+        }
+        "bench" => {
+            if args.is_empty() {
+                out("usage: bench <workload> [rr|hint|mlfq|hmlfq] [q=N] [hints=on|none|wrong] [seed=N]");
+                let line = alloc::format!("workloads: {}", crate::bench::WORKLOADS);
+                out(&line);
+            } else {
+                match crate::bench::start_from_shell(args) {
+                    Ok(()) => out("benchmark started (results print when every process has exited)"),
+                    Err(e) => {
+                        let line = alloc::format!("bench: {}", e);
+                        out(&line);
+                    }
+                }
+            }
+        }
+        "poweroff" => crate::bench::poweroff(),
         "install" => {
             let n = crate::usermode::install_all();
             let line = alloc::format!("installed {} programs as <name>.axe (see ls; run one with: exec hello.axe)", n);
@@ -461,12 +504,12 @@ fn dispatch(input: &str) {
             } else {
                 match crate::fs::read(name) {
                     None => out("exec: no such file"),
-                    Some(text) => match crate::usermode::parse_axe(&text) {
+                    Some(text) => match crate::usermode::parse_axe_full(&text) {
                         Err(e) => {
                             let line = alloc::format!("exec: {}", e);
                             out(&line);
                         }
-                        Ok(code) => match crate::usermode::spawn_bytes(name, code, prog_args, 0) {
+                        Ok((code, hint)) => match crate::usermode::spawn_bytes(name, code, prog_args, 0, hint) {
                             Ok(id) => {
                                 let line = alloc::format!("loaded {} from the filesystem as thread {}", name, id);
                                 out(&line);

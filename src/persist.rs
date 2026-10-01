@@ -27,8 +27,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 const MAGIC: &[u8; 4] = b"AFS1";
-/// Hard cap on the saved image (header + blob), in sectors — 128 KiB.
-const MAX_SECTORS: u32 = 256;
+/// Hard cap on the saved image (header + blob), in sectors — 1 MiB.
+const MAX_SECTORS: u32 = 2048;
 
 /// FNV-1a, a tiny well-known non-cryptographic hash: enough to catch
 /// corruption and partial writes, which is all we need here.

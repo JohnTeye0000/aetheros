@@ -56,6 +56,15 @@ impl InterruptIndex {
 /// can update it without a lock (a plain `static mut` would be `unsafe`).
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
+/// Timer interrupts per second. The PIT's default rate is ~18.2 Hz (one tick
+/// every ~55 ms) -- far too coarse to schedule or measure anything
+/// latency-sensitive -- so `init_hardware` reprograms it to 1 kHz: one tick
+/// per millisecond, the same order as Linux's CONFIG_HZ choices.
+pub const HZ: u64 = 1000;
+
+/// The PIT's input clock, fixed by the original IBM PC design.
+const PIT_INPUT_HZ: u64 = 1_193_182;
+
 lazy_static! {
     /// The single IDT for the whole kernel. The CPU only stores a *pointer* to
     /// this table (set by `lidt`), so the table itself must live for the entire
@@ -112,12 +121,27 @@ pub fn init() {
 
 /// Bring the hardware interrupts online: remap + initialise the PICs, then run
 /// `sti` to actually let the CPU accept interrupts. After this, the timer chip
-/// starts firing IRQ0 at us ~18.2 times a second with no further help from us.
+/// starts firing IRQ0 at us HZ times a second with no further help from us.
 ///
 /// `PICS.initialize()` is `unsafe` because talking to the wrong I/O ports could
 /// wedge the interrupt controller — but our offsets are the correct 32/40.
 pub fn init_hardware() {
     unsafe { PICS.lock().initialize() };
+
+    // Program PIT channel 0: command 0x36 = channel 0, write low then high
+    // byte of the divisor, mode 3 (square wave). Interrupt rate is
+    // input clock / divisor.
+    {
+        use x86_64::instructions::port::Port;
+        let divisor = (PIT_INPUT_HZ / HZ) as u16;
+        let mut cmd: Port<u8> = Port::new(0x43);
+        let mut ch0: Port<u8> = Port::new(0x40);
+        unsafe {
+            cmd.write(0x36);
+            ch0.write((divisor & 0xFF) as u8);
+            ch0.write((divisor >> 8) as u8);
+        }
+    }
 
     // Set the PIC interrupt masks explicitly. `initialize()` restores whatever
     // mask the BIOS left behind, which can leave the keyboard line disabled.
@@ -136,7 +160,7 @@ pub fn init_hardware() {
     x86_64::instructions::interrupts::enable();
 }
 
-/// How many timer ticks have elapsed since boot (a rough uptime: ~18.2/sec).
+/// How many timer ticks have elapsed since boot (HZ per second).
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::SeqCst)
 }

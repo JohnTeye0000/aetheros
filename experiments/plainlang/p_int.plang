@@ -1,0 +1,11 @@
+# Interactive-style: wait for the next "event", handle it quickly, 30 times.
+set handled to 0
+repeat 30 times
+wait 0.015
+set s to 0
+count i from 1 to 100
+set s to s plus i
+end
+set handled to handled plus 1
+end
+say "events handled: " plus handled

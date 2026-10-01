@@ -1,0 +1,10 @@
+# Behaves like p_io (a long burst of work, then a short wait), but its burst
+# is a `while` loop, whose length a static analysis can't know.
+repeat 30 times
+set x to 0
+while x is less than 10000
+set x to x plus 1
+end
+wait 0.004
+end
+say "trick done"

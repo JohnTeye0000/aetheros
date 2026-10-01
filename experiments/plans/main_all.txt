@@ -1,0 +1,9 @@
+# main matrix, workload all: every policy, plus hint/hmlfq with missing and wrong hints; 10 seeds each
+repeat 10 bench all rr
+repeat 10 bench all mlfq
+repeat 10 bench all hint
+repeat 10 bench all hmlfq
+repeat 10 bench all hint hints=none
+repeat 10 bench all hint hints=wrong
+repeat 10 bench all hmlfq hints=none
+repeat 10 bench all hmlfq hints=wrong

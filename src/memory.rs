@@ -62,7 +62,15 @@ unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut
 /// until we build a real allocator; for now we just need *some* unused frames.
 pub struct BootInfoFrameAllocator {
     memory_map: &'static MemoryMap,
-    next: usize,
+    /// Which usable region we're currently handing frames out of, and the
+    /// next unused address inside it. (Stage 35 fix: this used to be a frame
+    /// *count*, and every allocation re-walked the memory map from the start
+    /// to find the n-th frame -- O(n) per frame. With 2,000+ frames already
+    /// handed out at boot, creating one process took ~170 ms of emulated time,
+    /// which skewed the first benchmark of every boot. See devlog 035.)
+    region: usize,
+    next_addr: u64,
+    handed_out: usize,
     /// Frames handed back with `release`, reused before fresh ones.
     free: alloc::vec::Vec<PhysFrame>,
 }
@@ -72,25 +80,44 @@ impl BootInfoFrameAllocator {
     /// The caller must guarantee the memory map is valid and that the regions
     /// marked `Usable` are genuinely unused.
     pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
-        BootInfoFrameAllocator { memory_map, next: 0, free: alloc::vec::Vec::new() }
+        BootInfoFrameAllocator {
+            memory_map,
+            region: 0,
+            next_addr: 0,
+            handed_out: 0,
+            free: alloc::vec::Vec::new(),
+        }
     }
 
-    /// An iterator over every usable 4 KiB frame in the memory map.
-    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
-        // usable regions -> their address ranges -> every 4096-aligned start
-        // address within them -> the frame containing each.
-        let regions = self.memory_map.iter();
-        let usable = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
-        let addr_ranges = usable.map(|r| r.range.start_addr()..r.range.end_addr());
-        let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
-        frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
+    /// The next never-used frame, advancing through the usable regions in
+    /// order. Amortised O(1): only moves forward.
+    fn fresh_frame(&mut self) -> Option<PhysFrame> {
+        loop {
+            let r = self
+                .memory_map
+                .iter()
+                .filter(|r| r.region_type == MemoryRegionType::Usable)
+                .nth(self.region)?; // out of regions: out of memory
+            let start = r.range.start_addr();
+            let end = r.range.end_addr();
+            if self.next_addr < start {
+                self.next_addr = start;
+            }
+            if self.next_addr + 4096 <= end {
+                let frame = PhysFrame::containing_address(PhysAddr::new(self.next_addr));
+                self.next_addr += 4096;
+                self.handed_out += 1;
+                return Some(frame);
+            }
+            self.region += 1; // this region is used up
+        }
     }
 }
 
 impl BootInfoFrameAllocator {
     /// Frames currently handed out (allocated minus released).
     pub fn in_use(&self) -> usize {
-        self.next - self.free.len()
+        self.handed_out - self.free.len()
     }
 
     /// Give a frame back for reuse (e.g. when a process's address space is
@@ -105,9 +132,7 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
         if let Some(f) = self.free.pop() {
             return Some(f);
         }
-        let frame = self.usable_frames().nth(self.next);
-        self.next += 1;
-        frame
+        self.fresh_frame()
     }
 }
 

@@ -1,0 +1,17 @@
+# CPU-bound: count the primes below 30000 by trial division. Never waits.
+set found to 0
+count n from 2 to 30000
+set isprime to true
+set d to 2
+while d multiplied by d is at most n
+if remainder of n and d is equal to 0 then
+set isprime to false
+stop
+end
+set d to d plus 1
+end
+if isprime then
+set found to found plus 1
+end
+end
+say "primes below 30000: " plus found

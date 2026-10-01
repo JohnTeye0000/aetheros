@@ -32,7 +32,8 @@
 //! | 1   | write | rdi = ptr, rsi = len    | len, or -1 if the pointer is bad |
 //! | 2   | ticks | -                       | timer ticks since boot |
 //! | 3   | getpid| -                       | thread id |
-//! | 4   | sleep | rdi = ticks (max 100)   | 0 |
+//! | 4   | sleep | rdi = milliseconds (max 10000) | 0 |
+//! | 13  | printnum | rdi = bits of an f64 | 0 (prints it the way PlainLang does) |
 //!
 //! Every pointer a user program hands us is **validated** before the kernel
 //! dereferences it: it must lie entirely inside the program's own mapped code
@@ -40,7 +41,7 @@
 //! (or print!) kernel memory on its behalf.
 
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -52,12 +53,12 @@ use x86_64::{PhysAddr, VirtAddr};
 
 use crate::{print, serial_print};
 
-const CODE_PAGES: usize = 4;
-const STACK_PAGES: usize = 2;
+const CODE_PAGES: usize = 16; // 64 KiB: room for compiled PlainLang programs
+const STACK_PAGES: usize = 8; // 32 KiB: room for recursive compiled programs
 const CODE_BYTES: u64 = (CODE_PAGES * 4096) as u64;
 const STACK_BYTES: u64 = (STACK_PAGES * 4096) as u64;
 /// Stack sits well above the code, with an unmapped gap between them.
-const STACK_OFFSET: u64 = 0x10000;
+const STACK_OFFSET: u64 = 0x20000;
 
 /// Returned by `enter_user` when the program was killed by a fault rather than
 /// calling `exit` (exit statuses are masked to 32 bits, so they can't collide).
@@ -76,6 +77,7 @@ const SYS_SEND: u64 = 9;
 const SYS_RECV: u64 = 10;
 const SYS_SPAWN: u64 = 11;
 const SYS_WAIT: u64 = 12;
+const SYS_PRINTNUM: u64 = 13;
 
 global_asm!(
     r#"
@@ -92,6 +94,27 @@ global_asm!(
         mov  [rdx], rsp          // where `exit` will come back to
         mov  [r9], rsp           // ring 3 -> ring 0 interrupts land just below this
         mov  [rip + fast_kernel_rsp], rsp   // ...and so does the SYSCALL path
+        fninit                   // a new process gets a clean x87/SSE state,
+        sub  rsp, 8              // never the previous program's registers
+        mov  dword ptr [rsp], 0x1F80   // default MXCSR: all FP exceptions masked
+        ldmxcsr [rsp]
+        add  rsp, 8
+        pxor xmm0, xmm0
+        pxor xmm1, xmm1
+        pxor xmm2, xmm2
+        pxor xmm3, xmm3
+        pxor xmm4, xmm4
+        pxor xmm5, xmm5
+        pxor xmm6, xmm6
+        pxor xmm7, xmm7
+        pxor xmm8, xmm8
+        pxor xmm9, xmm9
+        pxor xmm10, xmm10
+        pxor xmm11, xmm11
+        pxor xmm12, xmm12
+        pxor xmm13, xmm13
+        pxor xmm14, xmm14
+        pxor xmm15, xmm15
         push r8                  // SS
         push rsi                 // RSP
         push 0x202               // RFLAGS: IF set (timer keeps preempting), IOPL 0
@@ -238,8 +261,8 @@ global_asm!(
         mov  rdi, rsp
         mov  esi, 3
         int  0x80
-        mov  eax, 4                      // sleep 9 ticks (~0.5 s)
-        mov  edi, 9
+        mov  eax, 4                      // sleep 300 ms
+        mov  edi, 300
         int  0x80
         inc  r12d
         cmp  r12d, 5
@@ -468,7 +491,7 @@ global_asm!(
         mov  esi, offset uf_msg_len
         syscall
         mov  eax, 4
-        mov  edi, 2
+        mov  edi, 100
         syscall
         mov  eax, 3                      // getpid via syscall
         syscall
@@ -573,7 +596,7 @@ global_asm!(
         mov  byte ptr [rsp], 0x3f        // '?'
     ui_have:
         mov  eax, 4                      // sleep: other processes run meanwhile,
-        mov  edi, 20                     // storing THEIR tag at this same address
+        mov  edi, 1000                     // storing THEIR tag at this same address
         int  0x80
         mov  eax, 1
         lea  rdi, [rip + ui_m]
@@ -619,7 +642,7 @@ global_asm!(
         mov  esi, 3
         int  0x80
         mov  eax, 4
-        mov  edi, 6
+        mov  edi, 300
         int  0x80
         inc  r12d
         cmp  r12d, 5
@@ -692,7 +715,7 @@ global_asm!(
         int  0x80
         mov  r13, rax
         mov  eax, 4                      // give the children time to run and print
-        mov  edi, 20
+        mov  edi, 1000
         int  0x80
         mov  eax, 1
         lea  rdi, [rip + ul_done]
@@ -788,6 +811,98 @@ global_asm!(
     uw_bugmsg_end:
     .equ uw_bugmsg_len, uw_bugmsg_end - uw_bugmsg
     user_waiter_end:
+
+    // ---- benchmark workloads (Stage 35) ------------------------------------
+    // Deliberately boring and deterministic: their only job is to have a
+    // known behaviour for the scheduler to cope with.
+
+    .global user_wcpu_start
+    .global user_wcpu_end
+    user_wcpu_start:
+        mov  rcx, 40000000
+    uwc_loop:
+        dec  rcx
+        jnz  uwc_loop
+        mov  eax, 0
+        xor  edi, edi
+        int  0x80
+    user_wcpu_end:
+
+    .global user_wio_start
+    .global user_wio_end
+    user_wio_start:
+        mov  r12d, 30
+    uwi_round:
+        mov  rcx, 300000
+    uwi_loop:
+        dec  rcx
+        jnz  uwi_loop
+        mov  eax, 4                      // "I/O": block for 4 ms
+        mov  edi, 4
+        int  0x80
+        dec  r12d
+        jnz  uwi_round
+        mov  eax, 0
+        xor  edi, edi
+        int  0x80
+    user_wio_end:
+
+    .global user_wint_start
+    .global user_wint_end
+    user_wint_start:
+        mov  r12d, 30
+    uwn_round:
+        mov  eax, 4                      // wait 15 ms for the next "event"
+        mov  edi, 15
+        int  0x80
+        mov  rcx, 30000                  // ...then handle it quickly
+    uwn_loop:
+        dec  rcx
+        jnz  uwn_loop
+        dec  r12d
+        jnz  uwn_round
+        mov  eax, 0
+        xor  edi, edi
+        int  0x80
+    user_wint_end:
+
+    // ---- SSE state test (Stage 36) ------------------------------------------
+    .global user_fpu_start
+    .global user_fpu_end
+    user_fpu_start:
+        mov  eax, 3                      // getpid -> a value unique to this process
+        int  0x80
+        mov  r12, rax
+        imul r12, r12, 0x01010101
+        movq xmm0, r12                   // park it in an SSE register...
+        cvtsi2sd xmm1, r12               // ...and do real double arithmetic too
+        mov  r13d, 40
+        xor  r14d, r14d                  // corruption count
+    ufp_loop:
+        mov  eax, 4                      // sleep 3 ms: other processes run meanwhile
+        mov  edi, 3
+        int  0x80
+        movq rbx, xmm0
+        cmp  rbx, r12
+        je   ufp_ok
+        inc  r14d
+        movq xmm0, r12
+    ufp_ok:
+        addsd xmm1, xmm1                 // xmm1 doubles every round
+        dec  r13d
+        jnz  ufp_loop
+        cvtsi2sd xmm2, r12               // xmm1 should now be r12 * 2^40
+        mov  rax, 0x4270000000000000     // 2^40 as a double
+        movq xmm3, rax
+        mulsd xmm2, xmm3
+        ucomisd xmm1, xmm2
+        je   ufp_done
+        inc  r14d
+    ufp_done:
+        mov  edi, r14d                   // exit status = corruptions seen (want 0)
+        mov  eax, 0
+        int  0x80
+    user_fpu_end:
 
     .text
     "#
@@ -893,7 +1008,7 @@ macro_rules! blob {
 /// `(name, one-line description)` of every built-in program.
 pub const PROGRAMS: &[(&str, &str)] = &[
     ("hello", "write a greeting via syscall, then exit"),
-    ("count", "print #1..#5 with a 9-tick sleep syscall between"),
+    ("count", "print #1..#5 with a 300 ms sleep syscall between"),
     ("spin", "burn CPU in ring 3 while the timer preempts it"),
     ("hlt", "execute a privileged instruction -> #GP -> killed"),
     ("poke", "write to kernel memory -> page fault -> killed"),
@@ -911,7 +1026,23 @@ pub const PROGRAMS: &[(&str, &str)] = &[
     ("selfmod", "overwrite own code page -> W^X page fault -> killed"),
     ("bint", "200k getpid calls via int 0x80; exit status = ticks taken"),
     ("bsys", "200k getpid calls via SYSCALL; exit status = ticks taken"),
+    ("fpu", "keep values in SSE registers across 40 sleeps; exit = corruptions (want 0)"),
+    ("wcpu", "benchmark: pure computation, never blocks (hint=cpu)"),
+    ("wio", "benchmark: short compute bursts + 4 ms simulated I/O waits (hint=io)"),
+    ("wint", "benchmark: waits 15 ms for an 'event', handles it briefly (hint=interactive)"),
 ];
+
+/// The scheduling hint each built-in declares about itself. Only the
+/// benchmark workloads declare one; everything else is `none`.
+pub fn builtin_hint(name: &str) -> crate::scheduler::Hint {
+    use crate::scheduler::Hint;
+    match name {
+        "wcpu" => Hint::Cpu,
+        "wio" => Hint::Io,
+        "wint" => Hint::Interactive,
+        _ => Hint::None,
+    }
+}
 
 pub fn builtin(name: &str) -> Option<&'static [u8]> {
     Some(match name {
@@ -933,6 +1064,10 @@ pub fn builtin(name: &str) -> Option<&'static [u8]> {
         "nx" => blob!(user_nx_start, user_nx_end),
         "selfmod" => blob!(user_selfmod_start, user_selfmod_end),
         "bint" => blob!(user_bint_start, user_bint_end),
+        "fpu" => blob!(user_fpu_start, user_fpu_end),
+        "wcpu" => blob!(user_wcpu_start, user_wcpu_end),
+        "wio" => blob!(user_wio_start, user_wio_end),
+        "wint" => blob!(user_wint_start, user_wint_end),
         "bsys" => blob!(user_bsys_start, user_bsys_end),
         _ => return None,
     })
@@ -952,7 +1087,7 @@ pub fn builtin(name: &str) -> Option<&'static [u8]> {
 /// once at first use: a slot that is empty in the kernel's own tables).
 static USER_BASE: AtomicU64 = AtomicU64::new(0);
 
-const MAX_PROCS: usize = 4;
+const MAX_PROCS: usize = 16;
 
 struct Proc {
     tid: usize,
@@ -1270,7 +1405,8 @@ extern "C" fn syscall_dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u
         SYS_TICKS => crate::interrupts::ticks(),
         SYS_GETPID => crate::scheduler::current_id() as u64,
         SYS_SLEEP => {
-            crate::scheduler::sleep_ticks(a1.min(100));
+            // 1 tick = 1 ms (interrupts::HZ = 1000)
+            crate::scheduler::sleep_ticks(a1.min(10_000));
             0
         }
         SYS_READFILE => sys_readfile(a1, a2, a3, a4),
@@ -1281,6 +1417,7 @@ extern "C" fn syscall_dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u
         SYS_RECV => sys_recv(a1, a2, a3, a4),
         SYS_SPAWN => sys_spawn(a1, a2, a3, a4),
         SYS_WAIT => sys_wait(a1, a2),
+        SYS_PRINTNUM => sys_printnum(a1),
         _ => u64::MAX, // ENOSYS
     }
 }
@@ -1416,6 +1553,31 @@ fn sys_getargs(bp: u64, bl: u64) -> u64 {
     n as u64
 }
 
+// --- wait keys ------------------------------------------------------------------
+//
+// A blocked thread waits on a 64-bit "key" (see `scheduler::block_current`);
+// whoever changes the thing it's waiting for calls `scheduler::wake_all(key)`.
+// The top nibble says what kind of thing; the rest identifies which one.
+
+fn name_hash(name: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h & 0x0FFF_FFFF_FFFF_FFFF
+}
+fn key_chan_data(name: &str) -> u64 {
+    0x1000_0000_0000_0000 | name_hash(name)
+}
+fn key_chan_space(name: &str) -> u64 {
+    0x2000_0000_0000_0000 | name_hash(name)
+}
+const KEY_KEYBOARD: u64 = 0x3000_0000_0000_0001;
+fn key_child_of(parent: usize) -> u64 {
+    0x4000_0000_0000_0000 | parent as u64
+}
+
 // --- inter-process communication: named channels ----------------------------
 //
 // A "channel" is a byte pipe identified by a short name, created the first
@@ -1445,7 +1607,7 @@ fn with_channel<R>(name: &str, create: bool, f: impl FnOnce(&mut alloc::collecti
 }
 
 /// send(name_ptr, name_len, data_ptr, data_len) -> bytes sent, or -1.
-/// Blocks (sleeping) while the channel is full; sends as much as fits each
+/// Blocks while the channel is full; sends as much as fits each
 /// time it wakes, so a send larger than the whole channel still completes.
 fn sys_send(np: u64, nl: u64, dp: u64, dl: u64) -> u64 {
     let name = match user_str(np, nl) {
@@ -1458,24 +1620,37 @@ fn sys_send(np: u64, nl: u64, dp: u64, dl: u64) -> u64 {
     let data = copy_from_user(dp, dl as usize);
     let mut sent = 0usize;
     while sent < data.len() {
+        // Check for room and (if none) block, in ONE interrupts-off section:
+        // no receiver can drain the channel between the check and the block.
         let took = x86_64::instructions::interrupts::without_interrupts(|| {
-            with_channel(&name, true, |q| {
+            let took = with_channel(&name, true, |q| {
                 let room = CHANNEL_CAPACITY.saturating_sub(q.len());
                 let n = room.min(data.len() - sent);
                 q.extend(&data[sent..sent + n]);
                 n
-            })
+            });
+            match took {
+                Some(0) => {
+                    crate::scheduler::block_current(key_chan_space(&name));
+                    Some(0)
+                }
+                other => other,
+            }
         });
         match took {
-            Some(0) | None => crate::scheduler::sleep_ticks(1),
-            Some(n) => sent += n,
+            None => return u64::MAX, // channel table full
+            Some(0) => {}             // woke up: retry
+            Some(n) => {
+                sent += n;
+                crate::scheduler::wake_all(key_chan_data(&name));
+            }
         }
     }
     sent as u64
 }
 
 /// recv(name_ptr, name_len, buf_ptr, buf_len) -> bytes received (>=1), or -1.
-/// Blocks (sleeping) until the channel exists and has at least one byte.
+/// Blocks until the channel has at least one byte.
 fn sys_recv(np: u64, nl: u64, bp: u64, bl: u64) -> u64 {
     let name = match user_str(np, nl) {
         Some(n) => n,
@@ -1486,21 +1661,32 @@ fn sys_recv(np: u64, nl: u64, bp: u64, bl: u64) -> u64 {
     }
     loop {
         let got = x86_64::instructions::interrupts::without_interrupts(|| {
-            with_channel(&name, true, |q| {
+            let got = with_channel(&name, true, |q| {
                 let n = q.len().min(bl as usize);
                 if n == 0 {
                     return None;
                 }
                 let bytes: Vec<u8> = q.drain(..n).collect();
                 Some(bytes)
-            })
-        })
-        .flatten();
-        if let Some(bytes) = got {
-            copy_to_user(bp, &bytes);
-            return bytes.len() as u64;
+            });
+            match got {
+                None => Err(()), // channel table full
+                Some(None) => {
+                    crate::scheduler::block_current(key_chan_data(&name));
+                    Ok(None)
+                }
+                Some(Some(b)) => Ok(Some(b)),
+            }
+        });
+        match got {
+            Err(()) => return u64::MAX,
+            Ok(None) => {} // woke up: retry
+            Ok(Some(bytes)) => {
+                crate::scheduler::wake_all(key_chan_space(&name));
+                copy_to_user(bp, &bytes);
+                return bytes.len() as u64;
+            }
         }
-        crate::scheduler::sleep_ticks(1);
     }
 }
 
@@ -1525,14 +1711,14 @@ fn sys_spawn(np: u64, nl: u64, ap: u64, al: u64) -> u64 {
             None => return u64::MAX,
         }
     };
-    let code = match builtin(&name) {
-        Some(c) => c.to_vec(),
-        None => match crate::fs::read(&name).and_then(|t| parse_axe(&t).ok()) {
-            Some(c) => c,
+    let (code, hint) = match builtin(&name) {
+        Some(c) => (c.to_vec(), builtin_hint(&name)),
+        None => match crate::fs::read(&name).and_then(|t| parse_axe_full(&t).ok()) {
+            Some(ch) => ch,
             None => return u64::MAX,
         },
     };
-    match spawn_bytes(&name, code, &args, parent) {
+    match spawn_bytes(&name, code, &args, parent, hint) {
         Ok(id) => id as u64,
         Err(_) => u64::MAX,
     }
@@ -1568,6 +1754,7 @@ fn record_exit(pid: usize, parent: usize, status: u64) {
         }
         ex.push(ExitRecord { pid, parent, status });
     });
+    crate::scheduler::wake_all(key_child_of(parent));
 }
 
 /// wait(pid_filter, status_out_ptr) -> pid that finished, or -1.
@@ -1580,29 +1767,158 @@ fn record_exit(pid: usize, parent: usize, status: u64) {
 fn sys_wait(pid_filter: u64, status_out: u64) -> u64 {
     let me = crate::scheduler::current_id();
     loop {
-        let found = x86_64::instructions::interrupts::without_interrupts(|| {
-            let mut ex = EXITED.lock();
-            let idx = ex
-                .iter()
-                .position(|r| r.parent == me && (pid_filter == 0 || r.pid as u64 == pid_filter));
-            idx.map(|i| ex.remove(i))
-        });
-        if let Some(r) = found {
-            if status_out != 0 && user_stack_ok(status_out, 4) {
-                copy_to_user(status_out, &(r.status as u32).to_le_bytes());
+        // Look for a finished child; if none but one is still alive, block --
+        // all in one interrupts-off section so its exit can't slip past us.
+        let outcome = x86_64::instructions::interrupts::without_interrupts(|| {
+            let found = {
+                let mut ex = EXITED.lock();
+                let idx = ex
+                    .iter()
+                    .position(|r| r.parent == me && (pid_filter == 0 || r.pid as u64 == pid_filter));
+                idx.map(|i| ex.remove(i))
+            };
+            if let Some(r) = found {
+                return Some(Some(r));
             }
-            return r.pid as u64;
-        }
-        let has_child = x86_64::instructions::interrupts::without_interrupts(|| {
-            PROCS
+            let has_child = PROCS
                 .lock()
                 .iter()
-                .any(|p| p.parent == me && (pid_filter == 0 || p.tid as u64 == pid_filter))
+                .any(|p| p.parent == me && (pid_filter == 0 || p.tid as u64 == pid_filter));
+            if !has_child {
+                return None; // no such child, alive or finished: don't block forever
+            }
+            crate::scheduler::block_current(key_child_of(me));
+            Some(None)
         });
-        if !has_child {
-            return u64::MAX; // no such child, alive or finished: don't block forever
+        match outcome {
+            None => return u64::MAX,
+            Some(None) => {} // woke: re-check
+            Some(Some(r)) => {
+                if status_out != 0 && user_stack_ok(status_out, 4) {
+                    copy_to_user(status_out, &(r.status as u32).to_le_bytes());
+                }
+                return r.pid as u64;
+            }
         }
-        crate::scheduler::sleep_ticks(1);
+    }
+}
+
+// --- printnum: numbers formatted exactly like PlainLang's format_number ---------
+//
+// PlainLang programs compiled for AetherOS (plainaxe.py, in the PlainLang repo)
+// print numbers through this call, so their output matches the reference
+// interpreter character for character: whole numbers without a decimal point
+// (exact digits, however large), everything else rounded half-away-from-zero
+// to 10 places, never scientific notation. The kernel is built soft-float, so
+// all of this is integer code underneath -- but IEEE-exact, which is what
+// matters for agreeing with the interpreter.
+
+fn f64_abs(x: f64) -> f64 {
+    f64::from_bits(x.to_bits() & !(1u64 << 63))
+}
+
+const TWO_52: f64 = 4_503_599_627_370_496.0;
+
+fn is_whole(x: f64) -> bool {
+    let a = f64_abs(x);
+    if !(a < f64::INFINITY) {
+        return false;
+    }
+    a >= TWO_52 || (x as i64) as f64 == x
+}
+
+/// Python's `math.copysign(math.floor(abs(x) + 0.5), x)`.
+fn round_half_away(x: f64) -> f64 {
+    let y = f64_abs(x) + 0.5;
+    let r = if y >= TWO_52 { y } else { (y as i64) as f64 };
+    if x.is_sign_negative() { -r } else { r }
+}
+
+/// Exact decimal digits of a whole double (Python's `str(int(x))`).
+fn whole_to_string(x: f64) -> String {
+    use core::fmt::Write;
+    let mut s = String::new();
+    if f64_abs(x) < 9.0e18 {
+        let _ = write!(s, "{}", x as i64);
+        return s;
+    }
+    // Large: x = mantissa * 2^exp exactly. Multiply out in base 10^9 limbs.
+    let bits = x.to_bits();
+    let exp = ((bits >> 52) & 0x7FF) as i32 - 1075;
+    let mut limbs: Vec<u64> = Vec::new();
+    let mut m = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+    while m > 0 {
+        limbs.push(m % 1_000_000_000);
+        m /= 1_000_000_000;
+    }
+    for _ in 0..exp {
+        let mut carry = 0;
+        for l in limbs.iter_mut() {
+            let v = *l * 2 + carry;
+            *l = v % 1_000_000_000;
+            carry = v / 1_000_000_000;
+        }
+        if carry > 0 {
+            limbs.push(carry);
+        }
+    }
+    if x < 0.0 {
+        s.push('-');
+    }
+    let last = limbs.len() - 1;
+    let _ = write!(s, "{}", limbs[last]);
+    for i in (0..last).rev() {
+        let _ = write!(s, "{:09}", limbs[i]);
+    }
+    s
+}
+
+pub fn format_plain_number(v: f64) -> String {
+    if is_whole(v) {
+        return whole_to_string(v);
+    }
+    let r = round_half_away(v * 1e10) / 1e10;
+    if is_whole(r) {
+        return whole_to_string(r);
+    }
+    // Rust's `{}` for f64 is the shortest digits that round-trip, never in
+    // exponent form: the same text Python's repr gives once rounded to 10
+    // places (PlainLang's own fallback strips exponents the same way).
+    alloc::format!("{}", r)
+}
+
+fn sys_printnum(bits: u64) -> u64 {
+    let text = format_plain_number(f64::from_bits(bits));
+    print!("{}", text);
+    serial_print!("{}", text);
+    0
+}
+
+/// Block a KERNEL thread until a user process it spawned (as `parent`) exits;
+/// returns the exit status (`u64::MAX` if it faulted, or if no such child).
+pub fn wait_child(pid: usize) -> u64 {
+    let me = crate::scheduler::current_id();
+    loop {
+        let outcome = x86_64::instructions::interrupts::without_interrupts(|| {
+            let found = {
+                let mut ex = EXITED.lock();
+                let idx = ex.iter().position(|r| r.parent == me && r.pid == pid);
+                idx.map(|i| ex.remove(i))
+            };
+            if let Some(r) = found {
+                return Some(Some(r.status));
+            }
+            if !PROCS.lock().iter().any(|p| p.tid == pid) {
+                return None;
+            }
+            crate::scheduler::block_current(key_child_of(me));
+            Some(None)
+        });
+        match outcome {
+            None => return u64::MAX,
+            Some(None) => {}
+            Some(Some(status)) => return status,
+        }
     }
 }
 
@@ -1621,25 +1937,33 @@ pub fn offer_key(c: char) -> bool {
     if !WAITING_FOR_KEY.load(Ordering::SeqCst) {
         return false;
     }
-    let mut q = KEYQ.lock();
-    if q.len() < 64 {
-        q.push(if c.is_ascii() { c as u8 } else { b'?' });
+    {
+        let mut q = KEYQ.lock();
+        if q.len() < 64 {
+            q.push(if c.is_ascii() { c as u8 } else { b'?' });
+        }
     }
+    crate::scheduler::wake_all(KEY_KEYBOARD);
     true
 }
 
 fn sys_readkey() -> u64 {
     loop {
-        let got = {
-            let mut q = KEYQ.lock();
-            if q.is_empty() { None } else { Some(q.remove(0)) }
-        };
+        let got = x86_64::instructions::interrupts::without_interrupts(|| {
+            let k = {
+                let mut q = KEYQ.lock();
+                if q.is_empty() { None } else { Some(q.remove(0)) }
+            };
+            if k.is_none() {
+                WAITING_FOR_KEY.store(true, Ordering::SeqCst);
+                crate::scheduler::block_current(KEY_KEYBOARD);
+            }
+            k
+        });
         if let Some(k) = got {
             WAITING_FOR_KEY.store(false, Ordering::SeqCst);
             return k as u64;
         }
-        WAITING_FOR_KEY.store(true, Ordering::SeqCst);
-        crate::scheduler::sleep_ticks(1);
     }
 }
 
@@ -1661,6 +1985,14 @@ fn sys_readkey() -> u64 {
 
 /// Parse an AXE1 text file into machine code.
 pub fn parse_axe(text: &str) -> Result<Vec<u8>, &'static str> {
+    parse_axe_full(text).map(|(code, _)| code)
+}
+
+/// Parse an AXE1 file into machine code plus its scheduling hint. A program may
+/// declare what kind of work it does with a `hint=cpu|io|interactive` token
+/// anywhere after the magic (Stage 35); files without one get `none`.
+pub fn parse_axe_full(text: &str) -> Result<(Vec<u8>, crate::scheduler::Hint), &'static str> {
+    let mut hint = crate::scheduler::Hint::None;
     let mut tokens = text
         .lines()
         .map(|l| l.split('#').next().unwrap_or(""))
@@ -1670,6 +2002,10 @@ pub fn parse_axe(text: &str) -> Result<Vec<u8>, &'static str> {
     }
     let mut code = Vec::new();
     for tok in tokens {
+        if let Some(h) = tok.strip_prefix("hint=") {
+            hint = crate::scheduler::Hint::parse(h).ok_or("unknown hint (cpu, io, interactive, none)")?;
+            continue;
+        }
         if tok.len() % 2 != 0 {
             return Err("odd number of hex digits in a token");
         }
@@ -1679,14 +2015,14 @@ pub fn parse_axe(text: &str) -> Result<Vec<u8>, &'static str> {
             let lo = (pair[1] as char).to_digit(16).ok_or("invalid hex digit")?;
             code.push((hi * 16 + lo) as u8);
             if code.len() > CODE_BYTES as usize {
-                return Err("program too large (max 16 KiB)");
+                return Err("program too large (max 64 KiB)");
             }
         }
     }
     if code.is_empty() {
         return Err("program has no code");
     }
-    Ok(code)
+    Ok((code, hint))
 }
 
 /// Render machine code as an AXE1 text file (16 bytes per line).
@@ -1695,6 +2031,10 @@ pub fn to_axe(name: &str, desc: &str, code: &[u8]) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "AXE1");
     let _ = writeln!(s, "# {} - {}", name, desc);
+    let hint = builtin_hint(name);
+    if hint != crate::scheduler::Hint::None {
+        let _ = writeln!(s, "hint={}", hint.name());
+    }
     for row in code.chunks(16) {
         for b in row {
             let _ = write!(s, "{:02x} ", b);
@@ -1708,13 +2048,26 @@ pub fn to_axe(name: &str, desc: &str, code: &[u8]) -> String {
 /// ended, then tear its address space down.
 extern "C" fn user_thread(_: usize) {
     let pid = crate::scheduler::current_id();
+    let quiet = crate::bench::quiet();
     let (name, len) = with_current(|p| (p.name.clone(), p.code_len)).expect("process record");
-    crate::println!("[user] pid {} '{}' -> ring 3 ({} bytes, private address space)", pid, name, len);
-    crate::serial_println!("[user] pid {} '{}' -> ring 3 ({} bytes, private address space)", pid, name, len);
+    if !quiet {
+        crate::println!("[user] pid {} '{}' -> ring 3 ({} bytes, private address space)", pid, name, len);
+        crate::serial_println!("[user] pid {} '{}' -> ring 3 ({} bytes, private address space)", pid, name, len);
+    }
 
     let parent = with_current(|p| p.parent).unwrap_or(0);
     let result = run_current();
+    // Measure now: the program's work is done, teardown isn't part of it.
+    let stats = crate::scheduler::current_stats();
+    let status = match &result {
+        Ok(Exit::Code(c)) => *c,
+        _ => FAULT_STATUS,
+    };
+    if quiet && result.is_ok() {
+        record_exit(pid, parent, status);
+    }
     match &result {
+        _ if quiet => {}
         Ok(Exit::Code(c)) => {
             crate::println!("[user] pid {} exited with status {}", pid, c);
             crate::serial_println!("[user] pid {} exited with status {}", pid, c);
@@ -1755,11 +2108,14 @@ extern "C" fn user_thread(_: usize) {
         KEYQ.lock().clear();
     });
     WAITING_FOR_KEY.store(false, Ordering::SeqCst);
-    crate::shell::prompt();
+    crate::bench::record(&name, status, stats);
+    if !quiet {
+        crate::shell::prompt();
+    }
 }
 
 /// One-time CPU setup the first time a program is launched.
-fn init_once() {
+pub fn init_once() {
     static DONE: AtomicBool = AtomicBool::new(false);
     if !DONE.swap(true, Ordering::SeqCst) {
         let (nx, smep, smap) = harden();
@@ -1771,20 +2127,27 @@ fn init_once() {
 
 /// Start `code` as a user process: build its private address space, then start
 /// a kernel thread that will enter ring 3.
-pub fn spawn_bytes(name: &str, code: Vec<u8>, args: &str, parent: usize) -> Result<usize, &'static str> {
+pub fn spawn_bytes(
+    name: &str,
+    code: Vec<u8>,
+    args: &str,
+    parent: usize,
+    hint: crate::scheduler::Hint,
+) -> Result<usize, &'static str> {
     if code.len() > CODE_BYTES as usize {
-        return Err("program too large (max 16 KiB)");
+        return Err("program too large (max 64 KiB)");
     }
     init_once();
     collect();
     if x86_64::instructions::interrupts::without_interrupts(|| PROCS.lock().len()) >= MAX_PROCS {
-        return Err("too many user programs running (max 4)");
+        return Err("too many user programs running (max 16)");
     }
     let proc_ = build_process(name, &code, args, parent)?;
     // Register the process and start its thread as one atomic step, so the
     // thread can never run before its record exists.
     Ok(x86_64::instructions::interrupts::without_interrupts(|| {
         let id = crate::scheduler::spawn(name, user_thread, 0);
+        crate::scheduler::set_hint(id, hint);
         let mut p = proc_;
         p.tid = id;
         PROCS.lock().push(p);
@@ -1795,7 +2158,7 @@ pub fn spawn_bytes(name: &str, code: Vec<u8>, args: &str, parent: usize) -> Resu
 /// Start the named built-in program.
 pub fn spawn_builtin(name: &str, args: &str) -> Result<usize, &'static str> {
     let code = builtin(name).ok_or("no such program (try: run)")?;
-    spawn_bytes(name, code.to_vec(), args, 0)
+    spawn_bytes(name, code.to_vec(), args, 0, builtin_hint(name))
 }
 
 /// Write every built-in program into the filesystem as `<name>.axe`.

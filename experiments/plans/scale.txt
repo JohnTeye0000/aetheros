@@ -1,0 +1,25 @@
+# scaling: N CPU-bound processes + 1 interactive, 5 seeds each
+repeat 5 bench scale1 rr
+repeat 5 bench scale1 mlfq
+repeat 5 bench scale1 hint
+repeat 5 bench scale1 hmlfq
+repeat 5 bench scale2 rr
+repeat 5 bench scale2 mlfq
+repeat 5 bench scale2 hint
+repeat 5 bench scale2 hmlfq
+repeat 5 bench scale4 rr
+repeat 5 bench scale4 mlfq
+repeat 5 bench scale4 hint
+repeat 5 bench scale4 hmlfq
+repeat 5 bench scale6 rr
+repeat 5 bench scale6 mlfq
+repeat 5 bench scale6 hint
+repeat 5 bench scale6 hmlfq
+repeat 5 bench scale8 rr
+repeat 5 bench scale8 mlfq
+repeat 5 bench scale8 hint
+repeat 5 bench scale8 hmlfq
+repeat 5 bench scale10 rr
+repeat 5 bench scale10 mlfq
+repeat 5 bench scale10 hint
+repeat 5 bench scale10 hmlfq

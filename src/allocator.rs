@@ -31,7 +31,7 @@ use x86_64::{
 /// arbitrary — a chunk of the vast unused virtual space that won't collide with
 /// the kernel, the stack, or the physical-memory map.
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-pub const HEAP_SIZE: usize = 512 * 1024; // 512 KiB (room for thread stacks)
+pub const HEAP_SIZE: usize = 8 * 1024 * 1024; // 8 MiB: thread stacks for many processes + a 1 MiB filesystem image
 
 /// The global allocator instance. `#[global_allocator]` tells Rust to route all
 /// `alloc` allocations through it. It starts empty; `init_heap` fills it in.
@@ -100,23 +100,22 @@ impl ListNode {
 }
 
 /// A **free-list allocator**: instead of one bump pointer, it keeps a linked
-/// list of every free block, sorted by nothing in particular — new free
-/// regions are just pushed onto the front.
+/// list of every free block, sorted by address, merging neighbouring blocks
+/// whenever a free makes them touch (coalescing).
 ///
 /// **Allocating** walks the list looking for the first block big enough (and
 /// with a usable aligned start) to hold the request — "first fit". If the
 /// block is bigger than needed, the leftover tail becomes a new, smaller free
 /// block instead of being wasted.
 ///
-/// **Freeing** is just: turn the returned memory back into a `ListNode` and
-/// push it onto the front of the list. No search, no bookkeeping table
-/// elsewhere — the freed memory becomes its own record.
+/// **Freeing** turns the returned memory back into a `ListNode` and inserts it
+/// in address order, merging it with the free blocks on either side if they
+/// touch. No bookkeeping table elsewhere — the freed memory becomes its own
+/// record.
 ///
-/// The real gain over Stage 5's bump allocator: freeing block A and then
-/// allocating block B of the same size will hand back A's exact old address,
-/// because A is now sitting right at the front of the free list. A bump
-/// allocator could never do that — it could only reclaim space once
-/// *everything* was freed at once.
+/// The real gain over Stage 5's bump allocator: freed space is reused
+/// individually. A bump allocator could only reclaim space once *everything*
+/// was freed at once.
 pub struct LinkedListAllocator {
     head: ListNode,
 }
@@ -135,19 +134,65 @@ impl LinkedListAllocator {
         self.add_free_region(heap_start, heap_size);
     }
 
-    /// Add a block of memory to the front of the free list. Used both to seed
-    /// the initial heap and to return a freed block.
+    /// Return a block of memory to the free list (also used to seed the heap).
+    ///
+    /// Stage 35 fix: the list is kept **sorted by address**, and a freed block
+    /// is **merged with its neighbours** when they touch. Before this, every
+    /// free was pushed onto the front unmerged, so after thousands of
+    /// alloc/free cycles the heap was shredded into small pieces: plenty of
+    /// free bytes in total, but no single piece big enough for a 32 KiB thread
+    /// stack. That killed long benchmark runs with "memory allocation of
+    /// 32768 bytes failed" -- see devlog 035.
     unsafe fn add_free_region(&mut self, addr: usize, size: usize) {
         // A block has to be big enough to hold a ListNode (it's about to
         // become one) and correctly aligned for one.
         assert_eq!(align_up(addr, mem::align_of::<ListNode>()), addr);
         assert!(size >= mem::size_of::<ListNode>());
 
-        let mut node = ListNode::new(size);
-        node.next = self.head.next.take();
-        let node_ptr = addr as *mut ListNode;
-        node_ptr.write(node);
-        self.head.next = Some(&mut *node_ptr);
+        // Walk to the last node that starts before `addr`. (Raw pointers: the
+        // list is threaded through memory we own, and we need to look at
+        // `prev` and `prev.next` at the same time.)
+        let head: *mut ListNode = &mut self.head;
+        let mut prev: *mut ListNode = head;
+        while let Some(next) = (*prev).next.as_mut() {
+            let next_ptr: *mut ListNode = &mut **next;
+            if (*next_ptr).start_addr() > addr {
+                break;
+            }
+            prev = next_ptr;
+        }
+
+        // Merge with the following block if it starts exactly where we end.
+        let mut size = size;
+        let mut after = (*prev).next.take();
+        if let Some(n) = after.as_mut() {
+            if addr + size == n.start_addr() {
+                size += n.size;
+                after = n.next.take();
+            }
+        }
+
+        // Merge into the preceding block if it ends exactly where we start
+        // (the head is a sentinel, not real memory, so never merge into it).
+        if prev != head && (*prev).end_addr() == addr {
+            (*prev).size += size;
+            (*prev).next = after;
+        } else {
+            let node_ptr = addr as *mut ListNode;
+            node_ptr.write(ListNode { size, next: after });
+            (*prev).next = Some(&mut *node_ptr);
+        }
+    }
+
+    /// Size of the largest single free block (fragmentation diagnostic).
+    fn largest_free(&self) -> usize {
+        let mut best = 0;
+        let mut current = &self.head;
+        while let Some(ref region) = current.next {
+            best = best.max(region.size);
+            current = region;
+        }
+        best
     }
 
     /// First-fit search: walk the list, and for the first block that can
@@ -221,6 +266,21 @@ impl LinkedListAllocator {
 // implement it on that.
 unsafe impl GlobalAlloc for Locked<LinkedListAllocator> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // Interrupts stay off while the lock is held. Otherwise a timer
+        // interrupt arriving mid-allocation whose handler also allocates
+        // (the scheduler records latency samples) would spin forever on a lock
+        // its own CPU holds. That exact deadlock hung long benchmark runs
+        // after ~70 runs -- see devlog 035.
+        interrupts::without_interrupts(|| self.alloc_inner(layout))
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        interrupts::without_interrupts(|| self.dealloc_inner(ptr, layout))
+    }
+}
+
+impl Locked<LinkedListAllocator> {
+    unsafe fn alloc_inner(&self, layout: Layout) -> *mut u8 {
         let (size, align) = LinkedListAllocator::size_align(layout);
         let mut allocator = self.lock();
 
@@ -239,7 +299,7 @@ unsafe impl GlobalAlloc for Locked<LinkedListAllocator> {
         }
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+    unsafe fn dealloc_inner(&self, ptr: *mut u8, layout: Layout) {
         let (size, _) = LinkedListAllocator::size_align(layout);
         self.lock().add_free_region(ptr as usize, size);
         LIVE_ALLOCATIONS.fetch_sub(1, Ordering::Relaxed);
@@ -284,4 +344,10 @@ pub fn heap_stats() -> (usize, usize, usize) {
         let used = total.saturating_sub(free);
         (used, total, LIVE_ALLOCATIONS.load(Ordering::Relaxed))
     })
+}
+
+/// Size of the largest single free block: when this is much smaller than the
+/// total free space, the heap is fragmented.
+pub fn largest_free_block() -> usize {
+    interrupts::without_interrupts(|| ALLOCATOR.lock().largest_free())
 }

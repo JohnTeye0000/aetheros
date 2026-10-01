@@ -1,0 +1,15 @@
+say "PlainLang, compiled to x86-64, running in ring 3 on AetherOS"
+define fact with n
+if n is at most 1 then
+return 1
+end
+return n multiplied by fact with (n minus 1)
+end
+say "20! = " plus (fact with 20)
+say "2^70 = " plus (power of 2 and 70)
+say "0.1 + 0.2 = " plus (0.1 plus 0.2)
+count i from 1 to 3
+say "tick " plus i
+wait 0.2
+end
+say 10 divided by 0
