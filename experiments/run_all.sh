@@ -24,7 +24,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$OUT"
 
 PLANS="main_cpu4 main_mixed main_interactive main_all scale quantum plainlang \
-fair_main fair_sweeps fair_plainlang hfair_main hfair_sweeps hfair_mult hfair_plainlang plainlang_v2"
+fair_main fair_sweeps fair_plainlang hfair_main hfair_sweeps hfair_mult hfair_plainlang plainlang_v2 aging_boost"
 
 running=0
 for p in $PLANS; do

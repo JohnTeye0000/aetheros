@@ -120,6 +120,10 @@ pub struct Config {
     pub seed: u64,
     /// `hfair` slice multiplier for cpu-hinted threads.
     pub mult: u64,
+    /// `hint`: wait (ms) after which a thread is aged to top priority.
+    pub aging: u64,
+    /// `mlfq`/`hmlfq`: period (ms) of the boost that returns everyone to the top level.
+    pub boost: u64,
 }
 
 pub const WORKLOADS: &str = "cpu4  mixed  interactive  all  scale<N>  fpu  files:a.axe+b.axe+...";
@@ -196,6 +200,8 @@ pub fn parse(args: &str) -> Result<Config, &'static str> {
         hints: HintMode::On,
         seed: 0,
         mult: DEFAULT_HFAIR_MULT,
+        aging: scheduler::DEFAULT_AGING_MS,
+        boost: scheduler::DEFAULT_BOOST_MS,
     };
     for tok in it {
         // `hfair8` = hfair with an 8x slice multiplier; plain `hfair` = default.
@@ -206,6 +212,10 @@ pub fn parse(args: &str) -> Result<Config, &'static str> {
             cfg.policy = p;
         } else if let Some(v) = tok.strip_prefix("q=") {
             cfg.quantum = v.parse().map_err(|_| "bad q=")?;
+        } else if let Some(v) = tok.strip_prefix("aging=") {
+            cfg.aging = v.parse().map_err(|_| "bad aging=")?;
+        } else if let Some(v) = tok.strip_prefix("boost=") {
+            cfg.boost = v.parse().map_err(|_| "bad boost=")?;
         } else if let Some(v) = tok.strip_prefix("seed=") {
             cfg.seed = v.parse().map_err(|_| "bad seed=")?;
         } else if let Some(v) = tok.strip_prefix("hints=") {
@@ -245,6 +255,8 @@ pub fn run(cfg: &Config) {
 
     scheduler::set_policy(cfg.policy);
     scheduler::set_hfair_mult(cfg.mult);
+    scheduler::set_aging_ms(cfg.aging);
+    scheduler::set_boost_ms(cfg.boost);
     scheduler::set_quantum_ms(cfg.quantum);
     without_interrupts(|| RESULTS.lock().clear());
     QUIET.store(true, Ordering::SeqCst);
@@ -299,11 +311,18 @@ pub fn run(cfg: &Config) {
     let results: Vec<Rec> = without_interrupts(|| core::mem::take(&mut *RESULTS.lock()));
     // The multiplier is part of the configuration's identity, so it goes in the
     // policy label: hfair (default 4), hfair2, hfair8, ...
-    let label = if cfg.policy == Policy::HintedFair && cfg.mult != 4 {
+    let mut label = if cfg.policy == Policy::HintedFair && cfg.mult != 4 {
         alloc::format!("hfair{}", cfg.mult)
     } else {
         String::from(cfg.policy.name())
     };
+    // Non-default aging / boost periods are part of the configuration's identity.
+    if cfg.policy == Policy::Hinted && cfg.aging != scheduler::DEFAULT_AGING_MS {
+        label = alloc::format!("{}-aging{}", label, cfg.aging);
+    }
+    if matches!(cfg.policy, Policy::Mlfq | Policy::HintedMlfq) && cfg.boost != scheduler::DEFAULT_BOOST_MS {
+        label = alloc::format!("{}-boost{}", label, cfg.boost);
+    }
     let tag = alloc::format!(
         "{},{},{},{},{},{}",
         run_id,

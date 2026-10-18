@@ -195,6 +195,11 @@ def write_report(data, out, warnings=()):
         ("n", None),
         ("interactive p95 lat", "interactive_lat_p95_ms"),
         ("interactive p99 lat", "interactive_lat_p99_ms"),
+        # Wake-up latency can't see a thread that is starved BEFORE its first
+        # dispatch (found 2026-10-18: wrong hints + aging off gave a 1.3 s
+        # response time and a 813 us p95). So report these two as well.
+        ("interactive response", "interactive_response_ms"),
+        ("interactive turnaround", "interactive_turnaround_ms"),
         ("io p95 lat", "io_lat_p95_ms"),
         ("io turnaround", "io_turnaround_ms"),
         ("phase p95 lat", "phase_lat_p95_ms"),

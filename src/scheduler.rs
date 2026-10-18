@@ -79,11 +79,22 @@ const LEVELS: u8 = 3;
 /// MLFQ: every BOOST_MS, all threads return to the top level (so CPU-bound
 /// threads can't starve forever, and a thread whose behaviour changed gets
 /// re-evaluated).
-const BOOST_MS: u64 = 200;
+pub const DEFAULT_BOOST_MS: u64 = 200;
+static BOOST_MS: AtomicU64 = AtomicU64::new(DEFAULT_BOOST_MS);
 
 /// `hint`: a thread that has been ready-but-not-running for AGING_MS is treated
 /// as top priority until it runs (so a CPU-bound thread can't starve forever).
-const AGING_MS: u64 = 100;
+pub const DEFAULT_AGING_MS: u64 = 100;
+static AGING_MS: AtomicU64 = AtomicU64::new(DEFAULT_AGING_MS);
+
+/// Runtime knobs, so the study can sweep them (and so a benchmark line can state
+/// them explicitly instead of inheriting whatever the last run left behind).
+pub fn set_aging_ms(ms: u64) {
+    AGING_MS.store(ms.max(1), Ordering::SeqCst);
+}
+pub fn set_boost_ms(ms: u64) {
+    BOOST_MS.store(ms.max(1), Ordering::SeqCst);
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
@@ -584,7 +595,7 @@ fn eff_level(t: &Thread, pol: Policy, now: u64) -> u8 {
     match pol {
         Policy::RoundRobin => 0,
         Policy::Hinted => {
-            let aging = AGING_MS * timing::tsc_hz() / 1000;
+            let aging = AGING_MS.load(Ordering::Relaxed) * timing::tsc_hz() / 1000;
             if t.state == State::Ready && aging > 0 && now.saturating_sub(t.ready_since) > aging {
                 0
             } else {
@@ -748,7 +759,7 @@ pub fn on_tick() {
             }
         }
         if matches!(pol, Policy::Mlfq | Policy::HintedMlfq)
-            && now_tick.saturating_sub(LAST_BOOST.load(Ordering::Relaxed)) >= BOOST_MS
+            && now_tick.saturating_sub(LAST_BOOST.load(Ordering::Relaxed)) >= BOOST_MS.load(Ordering::Relaxed)
         {
             LAST_BOOST.store(now_tick, Ordering::Relaxed);
             for t in s.threads.iter_mut() {

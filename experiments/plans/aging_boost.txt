@@ -1,0 +1,48 @@
+# Aging (hint) and boost (mlfq) sweeps, 5 seeds each. WRITTEN BEFORE RUNNING.
+#
+# Hypothesis behind the aging sweep: `hint` ages any thread that has waited
+# longer than AGING ms up to the interactive level. With many CPU-bound
+# competitors each waits several hundred ms between turns, so they all get aged,
+# tie with the interactive process, and one runs a slice first. That caused the 1-7 ms
+# outlier wake-ups seen at scale10 (median 4 us, p95 3.6 ms).
+#   P1. scale10 + hint: with aging off (100000 ms) the outliers vanish and p95
+#       is ~4 us; with aging=10 they are more frequent, so p95 is >= the
+#       default's 3.6 ms.
+#   P2. all + hint + WRONG hints: interactive p95 latency is bounded by the
+#       aging threshold, so it tracks it: ~10-20 ms at aging=10, ~50-60 at 50,
+#       ~200+ at 200, and with aging off the interactive process starves until
+#       the CPU-bound work finishes (~1 s or more).
+# Boost sweep (mlfq):
+#   P3. A shorter boost period means more time at the top level: interactive
+#       latency falls monotonically as boost shrinks, but never approaches
+#       fair's ~3 us. With the boost off it is the worst.
+# If P1 fails, the aging explanation is wrong and the outliers have another cause.
+repeat 5 bench scale10 hint aging=10
+repeat 5 bench scale10 hint aging=50
+repeat 5 bench scale10 hint aging=100
+repeat 5 bench scale10 hint aging=200
+repeat 5 bench scale10 hint aging=100000
+repeat 5 bench all hint hints=wrong aging=10
+repeat 5 bench all hint hints=wrong aging=50
+repeat 5 bench all hint hints=wrong aging=100
+repeat 5 bench all hint hints=wrong aging=200
+repeat 5 bench all hint hints=wrong aging=1000
+repeat 5 bench all hint hints=wrong aging=100000
+repeat 5 bench all mlfq boost=25
+repeat 5 bench interactive mlfq boost=25
+repeat 5 bench scale10 mlfq boost=25
+repeat 5 bench all mlfq boost=50
+repeat 5 bench interactive mlfq boost=50
+repeat 5 bench scale10 mlfq boost=50
+repeat 5 bench all mlfq boost=100
+repeat 5 bench interactive mlfq boost=100
+repeat 5 bench scale10 mlfq boost=100
+repeat 5 bench all mlfq boost=200
+repeat 5 bench interactive mlfq boost=200
+repeat 5 bench scale10 mlfq boost=200
+repeat 5 bench all mlfq boost=1000
+repeat 5 bench interactive mlfq boost=1000
+repeat 5 bench scale10 mlfq boost=1000
+repeat 5 bench all mlfq boost=100000
+repeat 5 bench interactive mlfq boost=100000
+repeat 5 bench scale10 mlfq boost=100000

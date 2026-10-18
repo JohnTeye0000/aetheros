@@ -132,19 +132,19 @@ magnitude relative to round robin and MLFQ.** Workload `all`: 2 us (`hint`)
 against 9.8 ms (`rr`) and 8.0 ms (`mlfq`). A woken interactive process has
 strictly higher priority, so it preempts within one timer tick. The advantage
 shrinks as CPU-bound competitors are added: 203 us with six, and 3.6 ms (+/-3.7
-across seeds) with ten, against 85 ms (`rr`) and 45 ms (`mlfq`). I haven't
-isolated why `hint` degrades there (a launch-phase effect is one candidate; I
-have not tested it).
+across seeds) with ten, against 85 ms (`rr`) and 45 ms (`mlfq`). The cause is
+the aging rule (F11): with aging off, `hint` is 4 us at ten competitors.
 
-**F2 - MLFQ recovers almost none of that and hurts I/O-bound work.**
-Interactive latency under `mlfq` is 8.0 ms against 9.8 ms for `rr` (`all`) and
-15.7 ms against 15.0 ms (`interactive`). The I/O-style process is slower than
-under round robin (21 ms vs 17 ms in `all`, 29 ms vs 21 ms in `mixed`). Its
-bursts are ~4.8 ms at a 50% duty cycle, and MLFQ's allotment accounting sinks it
-within a few bursts. The 200 ms boost caps the damage at scale (45 ms vs `rr`'s
-85 ms at ten competitors). `hmlfq` behaves like `mlfq` whatever the hints say
-(`interactive`: 15.8 / 16.3 / 16.9 ms with correct / no / wrong hints): MLFQ's
-demotion erases the hint.
+**F2 - MLFQ with the textbook periodic boost recovers almost none of that;
+without the boost it recovers all of it for strictly interactive work, at a
+price (revised - see F13).** With my default 200 ms boost, interactive latency
+under `mlfq` is 8.0 ms against 9.8 ms for `rr` (`all`) and 15.7 ms against
+15.0 ms (`interactive`), and the I/O-style process is slower than under round
+robin (21 ms vs 17 ms in `all`, 29 ms vs 21 ms in `mixed`). `hmlfq` behaves like
+`mlfq` whatever the hints say (`interactive`: 15.8 / 16.3 / 16.9 ms with
+correct / no / wrong hints): MLFQ's demotion erases the hint. **The first version
+of this document stated F2 without the qualification. The 200 ms boost was my
+choice, and the conclusion depends on it** (F13).
 
 **F3 - With nothing to distinguish, nothing changes.** On `cpu4` (four
 identical CPU-bound processes) makespan is within 0.4% across every policy.
@@ -152,15 +152,16 @@ identical CPU-bound processes) makespan is within 0.4% across every policy.
 **F4 - Wrong hints are worse than none for the hint-only policy.** With
 deliberately wrong hints `hint` gives the interactive process 106 ms p95
 latency, against 30-45 ms with *no* hints and ~10-15 ms under round robin. It is
-bounded only by the 100 ms aging rule, and the run takes 12% longer overall
-(1,618 ms vs 1,443 ms).
+bounded only by the 100 ms aging rule (F12), and the run takes 12% longer
+overall (1,618 ms vs 1,443 ms).
 
 ### Against a CFS-style baseline, most of the advantage disappears
 
 **F5 - A hint-free fair-queuing scheduler matches the hint scheduler on
 interactive latency.** `fair` 3 us, `hint` 2 us, `rr` 9.8 ms (`all`). With
-many competitors `fair` is the *better* of the two: with six, `fair` 4 us vs
-`hint` 203 us; with ten, `fair` 5 us vs `hint` 3.6 ms. It holds from q = 5 to
+many competitors `fair` is the *better* of the two *at the default aging
+setting*: with six, `fair` 4 us vs `hint` 203 us; with ten, `fair` 5 us vs `hint`
+3.6 ms. With aging off they're equal (F11). It holds from q = 5 to
 50 ms (3 us), and at q = 2 ms it's 203 us because the 1 ms slice floor limits
 reaction time. Mechanism: a sleeper has used little CPU, so its virtual runtime
 is small, so it preempts. Measured instead of declared.
@@ -201,6 +202,60 @@ I/O-style process in `all`: `hint` 0.62 ms, `fair` 1.5 ms, `hfair` 2.0 ms; in
 `mixed`: 1.8 ms vs 3.0 ms vs 1.0 ms. Smaller than the gaps in F1-F2, not
 consistently in `hint`'s favour, and it grows with the quantum under `fair` (7.4
 ms at q = 20). So it's the one place a declared hint beats measurement here.
+
+### The baselines' own tuning constants change the answers
+
+Two constants I chose when writing the baselines turned out to matter: `hint`'s
+aging threshold (100 ms) and MLFQ's boost period (200 ms). The sweeps
+(`plans/aging_boost.txt`, 145 runs) were written with predictions in the plan
+file's header *before* running, and are scored here honestly.
+
+**F11 - The hint scheduler's degradation with many competitors is caused by its
+aging rule (prediction P1: confirmed).** Interactive p95 latency at ten
+CPU-bound competitors, by aging threshold: 10 ms -> 4.8 ms; 50 ms -> 5.6 ms;
+100 ms (default) -> 3.6 ms; 200 ms -> 1.6 ms; **off -> 4 us in all five seeds.**
+The mechanism: each CPU-bound process waits several hundred ms between turns, so
+all of them get aged up to the interactive level, tie with the interactive
+process, and one of them runs a slice before it. Aging exists to prevent
+starvation, and removing it removes a latency tail but, see F12, also the
+starvation protection.
+
+**F12 - With wrong hints, latency tracks the aging threshold, and without
+aging the victim starves, which wake-up latency cannot see (prediction P2:
+direction right, numbers and the metric wrong).** Interactive p95 latency under
+wrong hints: 27 ms (aging 10), 67 ms (50), 106 ms (100), 206 ms (200). That's
+about the threshold plus 6-17 ms, a little above the ranges I predicted. I
+predicted starvation with aging off, but the p95 and even the *maximum* wake-up
+latency were tiny (813 us and 1.8 ms). The starvation is real, and it shows
+up in other columns: the victim's **response time (first dispatch) is 1,286 ms**
+and its turnaround 1,751 ms (450 ms with correct hints). Wake-up latency only
+counts samples after a thread's first sleep, so a thread that never gets to run
+in the first place is invisible to it. Reports now include response time and
+turnaround for the interactive class. The earlier tables (F1-F10) used wake-up
+latency alone; where they imply "no starvation" they imply less than they
+seem to.
+
+**F13 - MLFQ's boost *hurts* interactive latency; without it MLFQ matches the
+hint scheduler for interactive work and wrecks I/O-style work (prediction P3:
+wrong).** I predicted shorter boost periods would improve interactive latency
+monotonically. The opposite happened. In `all`, interactive p95 latency by boost
+period: 25 ms -> 9.8 ms; 50 -> 10.4; 100 -> 14.2; 200 (default) -> 8.4;
+**1000 ms or off -> 1 us**. At ten competitors: 85 ms with a boost every 25-100
+ms, 45 ms at the default, **2 us** at 1000 ms or off. The boost periodically
+returns every CPU-bound thread to the interactive process's level, which is
+exactly what MLFQ's demotion was supposed to prevent. The price is paid by the
+I/O-style process: with the boost off its p95 latency is **76 ms** (max 116 ms)
+against 6-23 ms with a boost, 1.5 ms for `fair` and 0.6 ms for `hint`; it is
+sunk to the bottom level and stays there. It also risks starving CPU-bound
+work, though not at these workload sizes (makespan +2% with the boost off).
+
+**What F11-F13 mean for F1-F10.** My first conclusion, "hints beat runtime
+inference by orders of magnitude", compared hints to an MLFQ whose boost
+period I had set to a value that cripples interactive latency. A reviewer who
+tuned the baseline differently would have got a different headline. The
+fair-queuing comparison (F5) doesn't have that problem, because `fair` has no
+period constant that trades latency against anything. It's still true that
+nothing in this study has been tuned for any policy except by the sweeps above.
 
 ### A design that combines them: hints size slices, measurement picks who runs
 
@@ -344,8 +399,11 @@ Devlog 035 has the details. The harness itself had to be debugged:
    source: that tests the compiler half. The classifier is a simple heuristic
    with stated thresholds, not a general program analysis. Two PlainLang
    programs (`p_phase`, `p_trick`) were written specifically to fool it.
-4. **Policy design choices matter.** (`hfair`'s slice multiplier is swept; the
-   others are not.) Results depend on Q = 10 ms, 3 levels,
+4. **Policy design choices matter, and F11-F13 show how much.** `hint`'s aging
+   and MLFQ's boost are swept now; `fair`'s wake-up granularity and sleeper credit
+   are not, nor are the 3 MLFQ levels, the hint-to-level mapping or the
+   `hint` quantum scaling. Any of them could move conclusions the way the
+   boost period did. Results depend on Q = 10 ms, 3 levels,
    200 ms boost, 100 ms aging. The quantum sweep varies Q; the others are fixed
    for now and should be swept before strong claims are made.
 5. **Small scale.** One CPU, at most 15 processes, seconds-long runs.
@@ -369,7 +427,9 @@ Devlog 035 has the details. The harness itself had to be debugged:
 - [x] **A fair-queuing baseline** (`fair`, CFS-style). It changed the main finding (F8-F10).
 - [x] **A policy that combines hints with fair queuing** (`hfair`; F9).
 - [ ] **Sweeps of `fair`'s own parameters** (wake-up granularity, sleeper credit).
-- [ ] **Sweeps of boost period and aging threshold.**
+- [x] **Sweeps of boost period and aging threshold** (F11-F13).
+- [ ] **Sweep the remaining constants** (`fair`'s wake-up granularity and sleeper credit, MLFQ levels).
+- [ ] **Report starvation properly**: response time and max latency alongside p95 for every class, in the main tables, and re-read F1-F10 with that in mind.
 - [ ] **Literature review**: reading the papers below and writing down, in your
   own words, what each one did and how this study differs. Needs to be done
   before claiming anything is novel.
