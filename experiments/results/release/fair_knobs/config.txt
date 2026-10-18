@@ -1,0 +1,54 @@
+timing=icount shift=3,sleep=off
+cpu=default
+bin=../target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin
+
+# fair's own constants: wake-up granularity (gran, ms) and sleeper credit (credit,
+# percent of the base quantum Q=10 ms). 5 seeds. WRITTEN BEFORE RUNNING.
+#
+# A woken sleeper is placed `credit` ms behind the field (bounded) and preempts
+# the running thread only if it is more than `gran` ms behind it.
+#   G1. gran < credit(=5 ms): interactive p95 latency stays ~3 us. gran >= 6 ms:
+#       the wake-up rule can never fire, so latency jumps to the slice scale
+#       (milliseconds). gran=0 behaves like gran=1.
+#   G2. credit=0: a sleeper is placed at the field's floor and can't out-rank
+#       the running thread by more than ~gran, so latency becomes slice-bound
+#       (milliseconds). credit >= gran (credit >= 10%) restores ~3 us.
+#   G3. Neither constant changes the makespan by more than ~1% (they only choose
+#       who runs next, not how much work gets done).
+repeat 5 bench all fair gran=0
+repeat 5 bench all fair gran=1
+repeat 5 bench all fair gran=2
+repeat 5 bench all fair gran=4
+repeat 5 bench all fair gran=6
+repeat 5 bench all fair gran=10
+repeat 5 bench all fair gran=20
+repeat 5 bench all fair credit=0
+repeat 5 bench all fair credit=10
+repeat 5 bench all fair credit=25
+repeat 5 bench all fair credit=50
+repeat 5 bench all fair credit=100
+repeat 5 bench interactive fair gran=0
+repeat 5 bench interactive fair gran=1
+repeat 5 bench interactive fair gran=2
+repeat 5 bench interactive fair gran=4
+repeat 5 bench interactive fair gran=6
+repeat 5 bench interactive fair gran=10
+repeat 5 bench interactive fair gran=20
+repeat 5 bench interactive fair credit=0
+repeat 5 bench interactive fair credit=10
+repeat 5 bench interactive fair credit=25
+repeat 5 bench interactive fair credit=50
+repeat 5 bench interactive fair credit=100
+repeat 5 bench scale10 fair gran=0
+repeat 5 bench scale10 fair gran=1
+repeat 5 bench scale10 fair gran=2
+repeat 5 bench scale10 fair gran=4
+repeat 5 bench scale10 fair gran=6
+repeat 5 bench scale10 fair gran=10
+repeat 5 bench scale10 fair gran=20
+repeat 5 bench scale10 fair credit=0
+repeat 5 bench scale10 fair credit=10
+repeat 5 bench scale10 fair credit=25
+repeat 5 bench scale10 fair credit=50
+repeat 5 bench scale10 fair credit=100
+poweroff

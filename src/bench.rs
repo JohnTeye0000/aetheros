@@ -124,6 +124,12 @@ pub struct Config {
     pub aging: u64,
     /// `mlfq`/`hmlfq`: period (ms) of the boost that returns everyone to the top level.
     pub boost: u64,
+    /// `fair`/`hfair`: wake-up preemption granularity (ms).
+    pub gran: u64,
+    /// `fair`/`hfair`: sleeper credit, percent of the base quantum.
+    pub credit: u64,
+    /// `fair`/`hfair`: the slice-lag preemption rule (default on; `lag=0` turns it off).
+    pub lag: bool,
 }
 
 pub const WORKLOADS: &str = "cpu4  mixed  interactive  all  scale<N>  fpu  files:a.axe+b.axe+...";
@@ -202,6 +208,9 @@ pub fn parse(args: &str) -> Result<Config, &'static str> {
         mult: DEFAULT_HFAIR_MULT,
         aging: scheduler::DEFAULT_AGING_MS,
         boost: scheduler::DEFAULT_BOOST_MS,
+        gran: scheduler::DEFAULT_FAIR_GRAN_MS,
+        credit: scheduler::DEFAULT_FAIR_CREDIT_PCT,
+        lag: scheduler::DEFAULT_FAIR_SLICE_LAG,
     };
     for tok in it {
         // `hfair8` = hfair with an 8x slice multiplier; plain `hfair` = default.
@@ -214,6 +223,12 @@ pub fn parse(args: &str) -> Result<Config, &'static str> {
             cfg.quantum = v.parse().map_err(|_| "bad q=")?;
         } else if let Some(v) = tok.strip_prefix("aging=") {
             cfg.aging = v.parse().map_err(|_| "bad aging=")?;
+        } else if let Some(v) = tok.strip_prefix("gran=") {
+            cfg.gran = v.parse().map_err(|_| "bad gran=")?;
+        } else if let Some(v) = tok.strip_prefix("lag=") {
+            cfg.lag = v != "0";
+        } else if let Some(v) = tok.strip_prefix("credit=") {
+            cfg.credit = v.parse().map_err(|_| "bad credit=")?;
         } else if let Some(v) = tok.strip_prefix("boost=") {
             cfg.boost = v.parse().map_err(|_| "bad boost=")?;
         } else if let Some(v) = tok.strip_prefix("seed=") {
@@ -257,6 +272,9 @@ pub fn run(cfg: &Config) {
     scheduler::set_hfair_mult(cfg.mult);
     scheduler::set_aging_ms(cfg.aging);
     scheduler::set_boost_ms(cfg.boost);
+    scheduler::set_fair_gran_ms(cfg.gran);
+    scheduler::set_fair_credit_pct(cfg.credit);
+    scheduler::set_fair_slice_lag(cfg.lag);
     scheduler::set_quantum_ms(cfg.quantum);
     without_interrupts(|| RESULTS.lock().clear());
     QUIET.store(true, Ordering::SeqCst);
@@ -319,6 +337,17 @@ pub fn run(cfg: &Config) {
     // Non-default aging / boost periods are part of the configuration's identity.
     if cfg.policy == Policy::Hinted && cfg.aging != scheduler::DEFAULT_AGING_MS {
         label = alloc::format!("{}-aging{}", label, cfg.aging);
+    }
+    if cfg.policy.is_fair() {
+        if cfg.gran != scheduler::DEFAULT_FAIR_GRAN_MS {
+            label = alloc::format!("{}-gran{}", label, cfg.gran);
+        }
+        if cfg.lag != scheduler::DEFAULT_FAIR_SLICE_LAG {
+            label = alloc::format!("{}-nolag", label);
+        }
+        if cfg.credit != scheduler::DEFAULT_FAIR_CREDIT_PCT {
+            label = alloc::format!("{}-credit{}", label, cfg.credit);
+        }
     }
     if matches!(cfg.policy, Policy::Mlfq | Policy::HintedMlfq) && cfg.boost != scheduler::DEFAULT_BOOST_MS {
         label = alloc::format!("{}-boost{}", label, cfg.boost);

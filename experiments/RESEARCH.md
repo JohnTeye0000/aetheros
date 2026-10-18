@@ -257,6 +257,32 @@ fair-queuing comparison (F5) doesn't have that problem, because `fair` has no
 period constant that trades latency against anything. It's still true that
 nothing in this study has been tuned for any policy except by the sweeps above.
 
+**F14 - `fair`'s latency does not depend on its own tuning constants in these
+workloads, for structural reasons I had to find by testing my prediction
+(G1: wrong; G2: mostly wrong; G3: confirmed).** Sweeping wake-up granularity
+(0-20 ms) and sleeper credit (0-100% of the quantum) over `all`, `interactive`
+and `scale10` (180 runs, `plans/fair_knobs.txt`): interactive p95 latency stays at
+3-6 us for every granularity, and for every credit except 0, which gives 1.0 ms
+in `all` and nothing in the other two. Makespan differs by under 0.01%. My
+prediction G1 said granularity above the 5 ms credit would push latency to
+milliseconds. I had forgotten that my own `fair` has a *second* preemption rule
+("preempt if a waiting thread has fallen a whole slice behind"), which fires
+first for any sleeper whose lag exceeds the 1-2.5 ms slice. A null result from a
+knob that does nothing could also mean the knob isn't wired up, so I tested that
+(`plans/fair_lag.txt`, predictions again written first): with the slice-lag rule
+switched off, granularity at or above the credit raises latency in `all` from 3 us
+to 1.0 ms, as predicted, and credit 0 does the same. So the knobs are wired up
+and the original null result is real. In `scale10` nothing moves even then:
+with ten competitors the slice is 1 ms, so the scheduler reconsiders on every
+tick and always picks the smallest virtual runtime, which makes the preemption
+rules moot.
+
+The consequence: `fair`'s low latency in this study comes from small slices plus
+picking the least-served thread, not from a lucky choice of constants. It could
+change with large slices and few competitors, where the preemption rules would
+carry the weight, and I haven't tested that regime beyond the quantum sweep
+(where it held, thanks to the slice-lag rule).
+
 ### A design that combines them: hints size slices, measurement picks who runs
 
 **F9 - `hfair` keeps `fair`'s latency and recovers most of `hint`'s switch
@@ -399,11 +425,11 @@ Devlog 035 has the details. The harness itself had to be debugged:
    source: that tests the compiler half. The classifier is a simple heuristic
    with stated thresholds, not a general program analysis. Two PlainLang
    programs (`p_phase`, `p_trick`) were written specifically to fool it.
-4. **Policy design choices matter, and F11-F13 show how much.** `hint`'s aging
-   and MLFQ's boost are swept now; `fair`'s wake-up granularity and sleeper credit
-   are not, nor are the 3 MLFQ levels, the hint-to-level mapping or the
-   `hint` quantum scaling. Any of them could move conclusions the way the
-   boost period did. Results depend on Q = 10 ms, 3 levels,
+4. **Policy design choices matter, and F11-F13 show how much.** `hint`'s aging,
+   MLFQ's boost and `fair`'s granularity and credit are swept now (F11-F14;
+   `fair` turned out to be insensitive). Not swept: the 3 MLFQ levels, the
+   hint-to-level mapping, `hint`'s quantum scaling, and `fair`'s slice
+   floor. Any of them could move conclusions the way the boost period did. Results depend on Q = 10 ms, 3 levels,
    200 ms boost, 100 ms aging. The quantum sweep varies Q; the others are fixed
    for now and should be swept before strong claims are made.
 5. **Small scale.** One CPU, at most 15 processes, seconds-long runs.
@@ -428,7 +454,8 @@ Devlog 035 has the details. The harness itself had to be debugged:
 - [x] **A policy that combines hints with fair queuing** (`hfair`; F9).
 - [ ] **Sweeps of `fair`'s own parameters** (wake-up granularity, sleeper credit).
 - [x] **Sweeps of boost period and aging threshold** (F11-F13).
-- [ ] **Sweep the remaining constants** (`fair`'s wake-up granularity and sleeper credit, MLFQ levels).
+- [x] **`fair`'s wake-up granularity and sleeper credit** (F14: insensitive).
+- [ ] **Sweep the remaining constants** (MLFQ levels, hint-to-level mapping, `hint`'s quantum scaling, `fair`'s 1 ms slice floor).
 - [ ] **Report starvation properly**: response time and max latency alongside p95 for every class, in the main tables, and re-read F1-F10 with that in mind.
 - [ ] **Literature review**: reading the papers below and writing down, in your
   own words, what each one did and how this study differs. Needs to be done

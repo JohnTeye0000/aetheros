@@ -1,0 +1,28 @@
+timing=icount shift=3,sleep=off
+cpu=default
+bin=../target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin
+
+# Plumbing check for fair's wake-up granularity (see fair_knobs.txt: gran had NO
+# effect). Hypothesis: the slice-lag rule subsumes it. WRITTEN BEFORE RUNNING.
+# With the slice-lag rule off (lag=0), if the knob is wired up correctly:
+#   L1. gran 0/1/2/4 (below the 5 ms sleeper credit): interactive p95 ~3 us.
+#   L2. gran 6/10/20 (above it): the wake-up rule can't fire, so latency becomes
+#       slice-bound (milliseconds).
+#   L3. makespan unchanged (~1%).
+# If L2 fails, the granularity knob is not wired up and the null result in
+# fair_knobs.txt means nothing.
+repeat 5 bench all fair gran=0 lag=0
+repeat 5 bench all fair gran=1 lag=0
+repeat 5 bench all fair gran=4 lag=0
+repeat 5 bench all fair gran=6 lag=0
+repeat 5 bench all fair gran=10 lag=0
+repeat 5 bench all fair gran=20 lag=0
+repeat 5 bench all fair lag=0 credit=0
+repeat 5 bench scale10 fair gran=0 lag=0
+repeat 5 bench scale10 fair gran=1 lag=0
+repeat 5 bench scale10 fair gran=4 lag=0
+repeat 5 bench scale10 fair gran=6 lag=0
+repeat 5 bench scale10 fair gran=10 lag=0
+repeat 5 bench scale10 fair gran=20 lag=0
+repeat 5 bench scale10 fair lag=0 credit=0
+poweroff

@@ -35,3 +35,20 @@ how much I'd trust any comparison where I also chose the baseline's constants.
 The new kernel knobs (`bench ... aging=N`, `boost=N`) exist so the sweeps are
 reproducible; the earlier measurement-defaults bug (devlog 039) is why each
 sweep line states its parameters explicitly.
+
+## Addendum: I'd forgotten my own rule
+
+After the aging and boost sweeps I did the same for `fair`'s own constants
+(wake-up granularity, sleeper credit), with predictions written first. Prediction:
+granularity above the 5 ms sleeper credit would push interactive latency to
+milliseconds. Result: no effect at all, up to 20 ms. A knob that does nothing is
+exactly what a plumbing bug looks like, so before believing a null result I
+asked what could make it true. Reading `on_tick` again: `fair` has a *second*
+preemption rule (preempt if a waiting thread has fallen a whole slice behind)
+that fires first for any sleeper lagging by more than the 1-2.5 ms slice. I'd
+written both rules, then predicted as if only one existed. I added a switch to
+disable the second rule and reran: granularity at or above the credit now raised
+latency from 3 us to 1.0 ms, as the original prediction said it would. So the
+knob was fine and the null result was real: `fair`'s low latency comes from small
+slices plus picking the least-served thread, not from lucky constants. Details
+are F14 in `experiments/RESEARCH.md`.

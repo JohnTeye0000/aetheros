@@ -60,7 +60,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
 use x86_64::instructions::interrupts;
 
@@ -530,7 +530,28 @@ fn quantum_for(pol: Policy, level: u8) -> u64 {
 // Parameters are scaled to this kernel's 1 ms tick (Linux's defaults are 6 ms
 // latency, 0.75 ms minimum granularity, 1 ms wake-up granularity).
 
-const FAIR_WAKEUP_GRAN_MS: u64 = 1;
+pub const DEFAULT_FAIR_GRAN_MS: u64 = 1;
+/// Sleeper credit as a percentage of the base quantum (Linux's "gentle fair
+/// sleepers" uses half the latency target).
+pub const DEFAULT_FAIR_CREDIT_PCT: u64 = 50;
+static FAIR_GRAN_MS: AtomicU64 = AtomicU64::new(DEFAULT_FAIR_GRAN_MS);
+/// The "preempt if a waiting thread has fallen a whole slice behind" rule. On by
+/// default. Exists so an experiment can switch it off and show that the
+/// wake-up granularity knob is wired up (with the rule on, it subsumes the
+/// granularity rule for any sleeper whose lag exceeds one slice).
+pub const DEFAULT_FAIR_SLICE_LAG: bool = true;
+static FAIR_SLICE_LAG: AtomicBool = AtomicBool::new(DEFAULT_FAIR_SLICE_LAG);
+pub fn set_fair_slice_lag(on: bool) {
+    FAIR_SLICE_LAG.store(on, Ordering::SeqCst);
+}
+static FAIR_CREDIT_PCT: AtomicU64 = AtomicU64::new(DEFAULT_FAIR_CREDIT_PCT);
+
+pub fn set_fair_gran_ms(ms: u64) {
+    FAIR_GRAN_MS.store(ms, Ordering::SeqCst);
+}
+pub fn set_fair_credit_pct(p: u64) {
+    FAIR_CREDIT_PCT.store(p.min(1000), Ordering::SeqCst);
+}
 
 fn ms_cycles(ms: u64) -> u64 {
     ms * timing::tsc_hz() / 1000
@@ -547,7 +568,7 @@ fn eff_vruntime(t: &Thread, now: u64) -> u64 {
 
 /// Place a thread that just woke up (sleeper credit, bounded).
 fn fair_place_woken(t: &mut Thread, min_vruntime: u64) {
-    let credit = ms_cycles(quantum_ms()) / 2;
+    let credit = ms_cycles(quantum_ms()) * FAIR_CREDIT_PCT.load(Ordering::Relaxed) / 100;
     t.vruntime = t.vruntime.max(min_vruntime.saturating_sub(credit));
 }
 
@@ -807,13 +828,15 @@ pub fn on_tick() {
             // has fallen a whole slice behind.
             if pol.is_fair() && !s.threads[cur].system {
                 let cur_vr = eff_vruntime(&s.threads[cur], now);
-                let gran = ms_cycles(FAIR_WAKEUP_GRAN_MS);
+                let gran = ms_cycles(FAIR_GRAN_MS.load(Ordering::Relaxed));
                 let slice_c = ms_cycles(slice);
+                let lag_rule = FAIR_SLICE_LAG.load(Ordering::Relaxed);
                 if s.threads.iter().any(|t| {
                     t.id != 0
                         && !t.system
                         && t.state == State::Ready
-                        && ((t.woke && t.vruntime + gran < cur_vr) || t.vruntime + slice_c < cur_vr)
+                        && ((t.woke && t.vruntime + gran < cur_vr)
+                            || (lag_rule && t.vruntime + slice_c < cur_vr))
                 }) {
                     expired = true;
                 }
