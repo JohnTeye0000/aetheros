@@ -1,5 +1,6 @@
 AXE1
 # p_int.plang - compiled from PlainLang by plainaxe
+# analysis: basic
 # estimated work: ~21,367 operations; estimated waits: 30
 # ~712 operations of work per wait
 # <= 2,000 per wait: mostly waiting, brief bursts -> interactive

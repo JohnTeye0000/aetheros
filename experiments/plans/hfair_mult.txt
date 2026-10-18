@@ -1,0 +1,11 @@
+# hfair slice multiplier sweep at q=10 (4 is the default, covered by hfair_main), 5 seeds.
+# (Run before the bench-defaults fix this silently ran at q=50; see devlog 039.)
+repeat 5 bench cpu4 hfair2 q=10
+repeat 5 bench all hfair2 q=10
+repeat 5 bench scale6 hfair2 q=10
+repeat 5 bench cpu4 hfair8 q=10
+repeat 5 bench all hfair8 q=10
+repeat 5 bench scale6 hfair8 q=10
+repeat 5 bench cpu4 hfair16 q=10
+repeat 5 bench all hfair16 q=10
+repeat 5 bench scale6 hfair16 q=10

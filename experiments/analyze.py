@@ -30,12 +30,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-POLICY_ORDER = ["rr", "fair", "mlfq", "hint", "hmlfq"]
+POLICY_ORDER = ["rr", "fair", "mlfq", "hint", "hmlfq", "hfair2", "hfair", "hfair8", "hfair16"]
 HINT_ORDER = ["on", "none", "wrong"]
 # what each program REALLY is (ground truth by construction), whatever hint it carries
 CLASS_OF = {"wcpu": "cpu", "wio": "io", "wint": "interactive",
             "p_cpu.axe": "cpu", "p_io.axe": "io", "p_int.axe": "interactive",
-            "p_phase.axe": "phase", "p_trick.axe": "io"}
+            "p_phase.axe": "phase", "p_trick.axe": "io", "p_trick_c.axe": "io",
+            "p_opaque.axe": "io"}
 CLASSES = ("cpu", "io", "interactive", "phase")
 
 
@@ -48,6 +49,10 @@ def workload_name(w):
         return "pl_phase"
     if "p_trick.axe" in progs:
         return "pl_trick"
+    if "p_trick_c.axe" in progs:
+        return "pl_counted"
+    if "p_opaque.axe" in progs:
+        return "pl_opaque"
     return "pl_mixed"
 
 # two-sided 95% t critical values, df = 1..30
@@ -141,6 +146,8 @@ def agg(runs, metric):
 def fmt(m, ci, digits=2):
     if math.isnan(m):
         return "-"
+    if abs(m) < 1 and digits < 3:
+        digits = 3          # sub-millisecond latencies: show microsecond resolution
     if math.isnan(ci):
         return f"{m:.{digits}f}"
     return f"{m:.{digits}f} ± {ci:.{digits}f}"

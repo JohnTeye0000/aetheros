@@ -1,0 +1,14 @@
+timing=icount shift=3,sleep=off
+cpu=default
+bin=C:\Users\USER\Downloads\programming roadmap\CLAUDE CODE\aetheros-kernel\target\x86_64-unknown-none\debug\bootimage-aetheros_kernel.bin
+
+# hfair (hints only size slices) vs fair: correct and deliberately wrong hints, 10 seeds
+repeat 10 bench cpu4 hfair
+repeat 10 bench cpu4 hfair hints=wrong
+repeat 10 bench mixed hfair
+repeat 10 bench mixed hfair hints=wrong
+repeat 10 bench interactive hfair
+repeat 10 bench interactive hfair hints=wrong
+repeat 10 bench all hfair
+repeat 10 bench all hfair hints=wrong
+poweroff

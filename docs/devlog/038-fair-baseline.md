@@ -50,3 +50,13 @@ Bit-exact comparison across runs turned out *not* to be a valid test: two disk
 images with different contents change boot-time instruction counts, which shifts
 where benchmark start falls relative to the 1 ms timer by a few microseconds. The
 valid test was the scheduler's own measured cost and the switch counts.
+
+## Addendum (same week): the cost conclusions above were wrong
+
+Everything in this entry about *cost* was measured on an unoptimized debug
+kernel. On the optimized kernel scheduler decision time is 2.5-3.4 us per switch,
+not 33-48 us, and every policy's makespan is within ~1% of the others
+(`scale10`: `fair` +1.1% over round robin, not +21%). The *latency* results hold on
+both builds. What survives of the cost story is the context-switch count
+(`fair` switches 2-15x more than `hint`), not a throughput penalty. The "better CPU-bound
+turnaround under hints" I reported is completion ordering, not speed. See devlog 039.

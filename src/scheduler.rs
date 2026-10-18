@@ -37,6 +37,7 @@
 //! | `mlfq`  | observed behaviour (MLFQ)      | Q << level          |
 //! | `hmlfq` | hint as MLFQ's starting level  | Q << level          |
 //! | `fair`  | nobody: CFS-style vruntime     | Q / runnable threads |
+//! | `hfair` | as fair; hint only sizes slices | cpu-hinted: x HFAIR_MULT |
 //!
 //! `hint` uses only *static* information (what the program says it is);
 //! `mlfq` uses only *runtime* information (what the program has been doing —
@@ -149,6 +150,8 @@ pub enum Policy {
     Mlfq,
     HintedMlfq,
     Fair,
+    /// `fair` plus hints that only SIZE time slices (never set priority).
+    HintedFair,
 }
 
 impl Policy {
@@ -159,6 +162,7 @@ impl Policy {
             Policy::Mlfq => "mlfq",
             Policy::HintedMlfq => "hmlfq",
             Policy::Fair => "fair",
+            Policy::HintedFair => "hfair",
         }
     }
     pub fn parse(s: &str) -> Option<Policy> {
@@ -168,6 +172,7 @@ impl Policy {
             "mlfq" => Policy::Mlfq,
             "hmlfq" => Policy::HintedMlfq,
             "fair" => Policy::Fair,
+            "hfair" => Policy::HintedFair,
             _ => return None,
         })
     }
@@ -177,8 +182,13 @@ impl Policy {
             2 => Policy::Mlfq,
             3 => Policy::HintedMlfq,
             4 => Policy::Fair,
+            5 => Policy::HintedFair,
             _ => Policy::RoundRobin,
         }
+    }
+    /// Both virtual-runtime policies.
+    pub fn is_fair(self) -> bool {
+        matches!(self, Policy::Fair | Policy::HintedFair)
     }
     fn to_u8(self) -> u8 {
         match self {
@@ -187,6 +197,7 @@ impl Policy {
             Policy::Mlfq => 2,
             Policy::HintedMlfq => 3,
             Policy::Fair => 4,
+            Policy::HintedFair => 5,
         }
     }
 }
@@ -537,9 +548,35 @@ fn nr_runnable(s: &Scheduler) -> u64 {
         .count() as u64
 }
 
+/// How many times longer than the plain fair slice a thread hinted `cpu` gets
+/// under `hfair`. A knob of the study (swept in experiments/plans/hfair_*.txt).
+static HFAIR_MULT: AtomicU64 = AtomicU64::new(4);
+
+pub fn hfair_mult() -> u64 {
+    HFAIR_MULT.load(Ordering::Relaxed)
+}
+pub fn set_hfair_mult(m: u64) {
+    HFAIR_MULT.store(m.clamp(1, 64), Ordering::SeqCst);
+}
+
 /// The fair slice in ticks: target latency shared among runnable threads.
 fn fair_slice(s: &Scheduler) -> u64 {
     (quantum_ms() / nr_runnable(s).max(1)).max(1)
+}
+
+/// The slice for one thread. Plain `fair`: the same for everyone. `hfair`: a
+/// thread declared `cpu` gets a longer slice, so it is switched out less
+/// often. That is the ONLY thing a hint does here. It never changes who is
+/// picked (vruntime alone decides that), so a wrong hint can cost some
+/// efficiency but cannot delay or starve another thread by more than the
+/// slice-length factor, and an interactive wake-up still preempts on vruntime.
+fn fair_slice_for(s: &Scheduler, t: &Thread, pol: Policy) -> u64 {
+    let base = fair_slice(s);
+    if pol == Policy::HintedFair && t.hint == Hint::Cpu {
+        base * hfair_mult()
+    } else {
+        base
+    }
 }
 
 /// The priority level the policy assigns this thread right now (0 = highest).
@@ -555,7 +592,7 @@ fn eff_level(t: &Thread, pol: Policy, now: u64) -> u8 {
             }
         }
         Policy::Mlfq | Policy::HintedMlfq => t.level,
-        Policy::Fair => 0,
+        Policy::Fair | Policy::HintedFair => 0,
     }
 }
 
@@ -589,7 +626,7 @@ fn pick(s: &Scheduler, pol: Policy, now: u64) -> Option<usize> {
         }
         // (rank, then -- for `fair` only -- vruntime): smallest wins; exact
         // ties keep the round-robin order.
-        let vr = if pol == Policy::Fair && !t.system { eff_vruntime(t, now) } else { 0 };
+        let vr = if pol.is_fair() && !t.system { eff_vruntime(t, now) } else { 0 };
         let key = (rank(t, pol, now), vr);
         if best.map_or(true, |(b, _)| key < b) {
             best = Some((key, i));
@@ -658,7 +695,7 @@ fn schedule() {
         // (Only under `fair`: the other policies must cost exactly what they
         // did before this policy existed, or old and new results would be
         // measured on different kernels.)
-        if pol == Policy::Fair {
+        if pol.is_fair() {
             if let Some(m) = s
                 .threads
                 .iter()
@@ -705,7 +742,7 @@ pub fn on_tick() {
         for t in s.threads.iter_mut() {
             if t.state == State::Sleeping && t.wake_tick <= now_tick {
                 t.make_ready(now, true);
-                if pol == Policy::Fair {
+                if pol.is_fair() {
                     fair_place_woken(t, minv);
                 }
             }
@@ -746,14 +783,18 @@ pub fn on_tick() {
                 }
             }
             let my_level = eff_level(&s.threads[cur], pol, now);
-            let slice = if pol == Policy::Fair { fair_slice(&s) } else { quantum_for(pol, my_level) };
+            let slice = if pol.is_fair() {
+                fair_slice_for(&s, &s.threads[cur], pol)
+            } else {
+                quantum_for(pol, my_level)
+            };
             if s.threads[cur].slice_used >= slice {
                 expired = true;
             }
             // `fair`: a thread woken since it last ran preempts if it is more
             // than the wake-up granularity behind; any thread preempts if it
             // has fallen a whole slice behind.
-            if pol == Policy::Fair && !s.threads[cur].system {
+            if pol.is_fair() && !s.threads[cur].system {
                 let cur_vr = eff_vruntime(&s.threads[cur], now);
                 let gran = ms_cycles(FAIR_WAKEUP_GRAN_MS);
                 let slice_c = ms_cycles(slice);
@@ -826,7 +867,7 @@ pub fn wake_all(key: u64) -> usize {
         let now = timing::now();
         let mut s = SCHED.lock();
         let minv = s.min_vruntime;
-        let fair = policy() == Policy::Fair;
+        let fair = policy().is_fair();
         let mut n = 0;
         for t in s.threads.iter_mut() {
             if t.state == State::Blocked && t.block_key == key {

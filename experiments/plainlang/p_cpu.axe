@@ -1,5 +1,6 @@
 AXE1
 # p_cpu.plang - compiled from PlainLang by plainaxe
+# analysis: basic
 # estimated work: ~51,358,297 operations; estimated waits: 0
 # never waits and does >= 50,000 operations -> cpu-bound
 # note: a 'while' loop's length can't be known statically; assumed 100 iterations

@@ -1,0 +1,7 @@
+# hfair on the PlainLang programs (compiler-derived hints), plus wrong hints
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_io.axe+p_int.axe hfair
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_io.axe+p_int.axe hfair hints=wrong
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_phase.axe hfair
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_phase.axe hfair hints=wrong
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_trick.axe+p_int.axe hfair
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_trick.axe+p_int.axe hfair hints=wrong

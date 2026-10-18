@@ -1,0 +1,17 @@
+timing=icount shift=3,sleep=off
+cpu=default
+bin=../target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin
+
+# fair: scaling and quantum sweeps, 5 seeds
+repeat 5 bench scale1 fair
+repeat 5 bench scale2 fair
+repeat 5 bench scale4 fair
+repeat 5 bench scale6 fair
+repeat 5 bench scale8 fair
+repeat 5 bench scale10 fair
+repeat 5 bench all fair q=2
+repeat 5 bench all fair q=5
+repeat 5 bench all fair q=10
+repeat 5 bench all fair q=20
+repeat 5 bench all fair q=50
+poweroff

@@ -1,5 +1,6 @@
 AXE1
 # p_phase.plang - compiled from PlainLang by plainaxe
+# analysis: basic
 # estimated work: ~51,368,918 operations; estimated waits: 15
 # ~3,424,595 operations of work per wait
 # > 100,000 per wait: waits are rare compared to work -> cpu

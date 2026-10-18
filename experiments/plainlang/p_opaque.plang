@@ -1,0 +1,16 @@
+# Behaves like p_io (a ~3 ms burst of work, then a short wait), but the loop
+# bound comes from a function call, which the classifier never evaluates. Even
+# the counted-loop analysis can't see through it, and guesses 100 iterations
+# where the truth is 10,000.
+define limit with a
+return a multiplied by 100
+end
+repeat 30 times
+set n to limit with 100
+set x to 0
+while x is less than n
+set x to x plus 1
+end
+wait 0.004
+end
+say "opaque done"

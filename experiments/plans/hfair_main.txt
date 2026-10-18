@@ -1,0 +1,9 @@
+# hfair (hints only size slices) vs fair: correct and deliberately wrong hints, 10 seeds
+repeat 10 bench cpu4 hfair
+repeat 10 bench cpu4 hfair hints=wrong
+repeat 10 bench mixed hfair
+repeat 10 bench mixed hfair hints=wrong
+repeat 10 bench interactive hfair
+repeat 10 bench interactive hfair hints=wrong
+repeat 10 bench all hfair
+repeat 10 bench all hfair hints=wrong

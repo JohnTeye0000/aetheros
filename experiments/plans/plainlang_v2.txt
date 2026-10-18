@@ -1,0 +1,15 @@
+# Classifier-quality workloads, all policies, 10 seeds:
+#   pl_counted: p_trick compiled with the counted-loop analysis (hint=io, correct)
+#   pl_opaque:  loop bound hidden behind a function call (hint=interactive, WRONG: really io-like)
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_trick_c.axe+p_int.axe rr
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_trick_c.axe+p_int.axe fair
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_trick_c.axe+p_int.axe mlfq
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_trick_c.axe+p_int.axe hint
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_trick_c.axe+p_int.axe hmlfq
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_trick_c.axe+p_int.axe hfair
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_opaque.axe+p_int.axe rr
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_opaque.axe+p_int.axe fair
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_opaque.axe+p_int.axe mlfq
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_opaque.axe+p_int.axe hint
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_opaque.axe+p_int.axe hmlfq
+repeat 10 bench files:p_cpu.axe+p_cpu.axe+p_opaque.axe+p_int.axe hfair

@@ -1,5 +1,6 @@
 AXE1
 # p_trick.plang - compiled from PlainLang by plainaxe
+# analysis: basic
 # estimated work: ~21,153 operations; estimated waits: 30
 # ~705 operations of work per wait
 # <= 2,000 per wait: mostly waiting, brief bursts -> interactive

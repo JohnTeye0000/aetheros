@@ -1,5 +1,6 @@
 AXE1
 # p_io.plang - compiled from PlainLang by plainaxe
+# analysis: basic
 # estimated work: ~2,100,367 operations; estimated waits: 30
 # ~70,012 operations of work per wait
 # <= 100,000 per wait: bursts of work between waits -> io

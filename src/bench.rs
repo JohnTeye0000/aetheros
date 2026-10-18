@@ -108,12 +108,18 @@ impl HintMode {
     }
 }
 
+/// What a `bench` line means when it doesn't say.
+const DEFAULT_QUANTUM_MS: u64 = 10;
+const DEFAULT_HFAIR_MULT: u64 = 4;
+
 pub struct Config {
     pub workload: String,
     pub policy: Policy,
     pub quantum: u64,
     pub hints: HintMode,
     pub seed: u64,
+    /// `hfair` slice multiplier for cpu-hinted threads.
+    pub mult: u64,
 }
 
 pub const WORKLOADS: &str = "cpu4  mixed  interactive  all  scale<N>  fpu  files:a.axe+b.axe+...";
@@ -181,13 +187,22 @@ pub fn parse(args: &str) -> Result<Config, &'static str> {
     }
     let mut cfg = Config {
         workload: String::from(workload),
-        policy: scheduler::policy(),
-        quantum: scheduler::quantum_ms(),
+        // Defaults are CONSTANTS, not "whatever the previous run left behind":
+        // a benchmark line must mean the same thing wherever it appears in a
+        // plan. (Before this fix `bench` inherited the last run's quantum, so a
+        // plan line without q= silently ran at the quantum of the line above it.)
+        policy: Policy::RoundRobin,
+        quantum: DEFAULT_QUANTUM_MS,
         hints: HintMode::On,
         seed: 0,
+        mult: DEFAULT_HFAIR_MULT,
     };
     for tok in it {
-        if let Some(p) = Policy::parse(tok) {
+        // `hfair8` = hfair with an 8x slice multiplier; plain `hfair` = default.
+        if let Some(n) = tok.strip_prefix("hfair").filter(|n| !n.is_empty()) {
+            cfg.policy = Policy::HintedFair;
+            cfg.mult = n.parse().map_err(|_| "bad hfair multiplier (hfair8)")?;
+        } else if let Some(p) = Policy::parse(tok) {
             cfg.policy = p;
         } else if let Some(v) = tok.strip_prefix("q=") {
             cfg.quantum = v.parse().map_err(|_| "bad q=")?;
@@ -229,6 +244,7 @@ pub fn run(cfg: &Config) {
     let run_id = RUN_ID.fetch_add(1, Ordering::SeqCst) + 1;
 
     scheduler::set_policy(cfg.policy);
+    scheduler::set_hfair_mult(cfg.mult);
     scheduler::set_quantum_ms(cfg.quantum);
     without_interrupts(|| RESULTS.lock().clear());
     QUIET.store(true, Ordering::SeqCst);
@@ -281,18 +297,25 @@ pub fn run(cfg: &Config) {
     QUIET.store(false, Ordering::SeqCst);
 
     let results: Vec<Rec> = without_interrupts(|| core::mem::take(&mut *RESULTS.lock()));
+    // The multiplier is part of the configuration's identity, so it goes in the
+    // policy label: hfair (default 4), hfair2, hfair8, ...
+    let label = if cfg.policy == Policy::HintedFair && cfg.mult != 4 {
+        alloc::format!("hfair{}", cfg.mult)
+    } else {
+        String::from(cfg.policy.name())
+    };
     let tag = alloc::format!(
         "{},{},{},{},{},{}",
         run_id,
         cfg.workload,
-        cfg.policy.name(),
+        label,
         cfg.quantum,
         cfg.hints.name(),
         cfg.seed
     );
     println!(
         "bench #{} {} policy={} q={} hints={} seed={}",
-        run_id, cfg.workload, cfg.policy.name(), cfg.quantum, cfg.hints.name(), cfg.seed
+        run_id, cfg.workload, label, cfg.quantum, cfg.hints.name(), cfg.seed
     );
     println!("  pid prog  hint         turnaround_us  cpu_us   wait_us  lat_p95");
     for r in &results {
