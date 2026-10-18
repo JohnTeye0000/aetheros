@@ -36,6 +36,7 @@
 //! | `hint`  | the program's declared hint    | Q << level          |
 //! | `mlfq`  | observed behaviour (MLFQ)      | Q << level          |
 //! | `hmlfq` | hint as MLFQ's starting level  | Q << level          |
+//! | `fair`  | nobody: CFS-style vruntime     | Q / runnable threads |
 //!
 //! `hint` uses only *static* information (what the program says it is);
 //! `mlfq` uses only *runtime* information (what the program has been doing —
@@ -147,6 +148,7 @@ pub enum Policy {
     Hinted,
     Mlfq,
     HintedMlfq,
+    Fair,
 }
 
 impl Policy {
@@ -156,6 +158,7 @@ impl Policy {
             Policy::Hinted => "hint",
             Policy::Mlfq => "mlfq",
             Policy::HintedMlfq => "hmlfq",
+            Policy::Fair => "fair",
         }
     }
     pub fn parse(s: &str) -> Option<Policy> {
@@ -164,6 +167,7 @@ impl Policy {
             "hint" => Policy::Hinted,
             "mlfq" => Policy::Mlfq,
             "hmlfq" => Policy::HintedMlfq,
+            "fair" => Policy::Fair,
             _ => return None,
         })
     }
@@ -172,6 +176,7 @@ impl Policy {
             1 => Policy::Hinted,
             2 => Policy::Mlfq,
             3 => Policy::HintedMlfq,
+            4 => Policy::Fair,
             _ => Policy::RoundRobin,
         }
     }
@@ -181,6 +186,7 @@ impl Policy {
             Policy::Hinted => 1,
             Policy::Mlfq => 2,
             Policy::HintedMlfq => 3,
+            Policy::Fair => 4,
         }
     }
 }
@@ -267,6 +273,9 @@ struct Thread {
     preempts: u64,
     blocks: u64,
     lat: Vec<u64>,
+    /// `fair`: CPU time used, adjusted on wake-up (TSC cycles). The fair
+    /// policy always runs the runnable thread with the smallest.
+    vruntime: u64,
 }
 
 impl Thread {
@@ -297,6 +306,7 @@ impl Thread {
             preempts: 0,
             blocks: 0,
             lat: Vec::new(),
+            vruntime: 0,
         }
     }
 
@@ -313,6 +323,10 @@ struct Scheduler {
     threads: Vec<Box<Thread>>,
     current: usize,
     next_id: usize,
+    /// `fair`: a floor that only moves forward -- roughly the smallest
+    /// vruntime among runnable threads. New and waking threads are placed
+    /// relative to it.
+    min_vruntime: u64,
 }
 
 /// Only ever locked with interrupts disabled (from inside interrupt handlers,
@@ -322,6 +336,7 @@ static SCHED: Mutex<Scheduler> = Mutex::new(Scheduler {
     threads: Vec::new(),
     current: 0,
     next_id: 1,
+    min_vruntime: 0,
 });
 
 /// A progress counter per thread id (modulo the table size), so demo threads
@@ -449,6 +464,7 @@ fn spawn_inner(name: &str, entry: extern "C" fn(usize), arg: usize, system: bool
         PROGRESS[id % PROGRESS_SLOTS].store(0, Ordering::Relaxed);
         let mut t = Thread::new(id, name, State::Ready, rsp, Some(stack));
         t.system = system;
+        t.vruntime = s.min_vruntime; // a newcomer starts level with the field
         s.threads.push(Box::new(t));
         id
     })
@@ -474,6 +490,58 @@ fn quantum_for(pol: Policy, level: u8) -> u64 {
     }
 }
 
+// --- the `fair` policy: a CFS-style virtual-runtime scheduler -------------------
+//
+// The baseline a reviewer would ask for: Linux's CFS (2007-2023) favours
+// interactive work WITHOUT hints, purely from runtime behaviour. Mechanism (see
+// the Linux kernel's Documentation/scheduler/sched-design-CFS.rst):
+//   * every thread accumulates "virtual runtime" = CPU time used (all weights
+//     equal here; no nice levels), and the runnable thread with the least runs;
+//   * a target latency (here: the base quantum Q) is divided among the
+//     runnable threads, so each gets a slice of Q / n, but at least one tick;
+//   * a thread waking from sleep is placed at max(its vruntime,
+//     min_vruntime - Q/2): credit for having slept, but bounded
+//     ("gentle fair sleepers");
+//   * a woken thread preempts the running one if it is more than
+//     FAIR_WAKEUP_GRAN_MS behind it; otherwise threads switch when a slice
+//     ends (or when someone falls a whole slice behind).
+// Parameters are scaled to this kernel's 1 ms tick (Linux's defaults are 6 ms
+// latency, 0.75 ms minimum granularity, 1 ms wake-up granularity).
+
+const FAIR_WAKEUP_GRAN_MS: u64 = 1;
+
+fn ms_cycles(ms: u64) -> u64 {
+    ms * timing::tsc_hz() / 1000
+}
+
+/// vruntime including the run in progress, if this is the running thread.
+fn eff_vruntime(t: &Thread, now: u64) -> u64 {
+    if t.state == State::Running {
+        t.vruntime + now.saturating_sub(t.dispatched_at)
+    } else {
+        t.vruntime
+    }
+}
+
+/// Place a thread that just woke up (sleeper credit, bounded).
+fn fair_place_woken(t: &mut Thread, min_vruntime: u64) {
+    let credit = ms_cycles(quantum_ms()) / 2;
+    t.vruntime = t.vruntime.max(min_vruntime.saturating_sub(credit));
+}
+
+/// Number of ordinary (non-idle, non-system) runnable threads.
+fn nr_runnable(s: &Scheduler) -> u64 {
+    s.threads
+        .iter()
+        .filter(|t| t.id != 0 && !t.system && matches!(t.state, State::Ready | State::Running))
+        .count() as u64
+}
+
+/// The fair slice in ticks: target latency shared among runnable threads.
+fn fair_slice(s: &Scheduler) -> u64 {
+    (quantum_ms() / nr_runnable(s).max(1)).max(1)
+}
+
 /// The priority level the policy assigns this thread right now (0 = highest).
 fn eff_level(t: &Thread, pol: Policy, now: u64) -> u8 {
     match pol {
@@ -487,6 +555,7 @@ fn eff_level(t: &Thread, pol: Policy, now: u64) -> u8 {
             }
         }
         Policy::Mlfq | Policy::HintedMlfq => t.level,
+        Policy::Fair => 0,
     }
 }
 
@@ -507,7 +576,7 @@ fn rank(t: &Thread, pol: Policy, now: u64) -> u8 {
 fn pick(s: &Scheduler, pol: Policy, now: u64) -> Option<usize> {
     let n = s.threads.len();
     let cur = s.current;
-    let mut best: Option<(u8, usize)> = None;
+    let mut best: Option<((u8, u64), usize)> = None;
     for k in 1..=n {
         let i = (cur + k) % n;
         let t = &s.threads[i];
@@ -518,9 +587,12 @@ fn pick(s: &Scheduler, pol: Policy, now: u64) -> Option<usize> {
         if !runnable {
             continue;
         }
-        let lvl = rank(t, pol, now);
-        if best.map_or(true, |(b, _)| lvl < b) {
-            best = Some((lvl, i));
+        // (rank, then -- for `fair` only -- vruntime): smallest wins; exact
+        // ties keep the round-robin order.
+        let vr = if pol == Policy::Fair && !t.system { eff_vruntime(t, now) } else { 0 };
+        let key = (rank(t, pol, now), vr);
+        if best.map_or(true, |(b, _)| key < b) {
+            best = Some((key, i));
         }
     }
     best.map(|(_, i)| i)
@@ -556,7 +628,9 @@ fn schedule() {
 
         {
             let c = &mut s.threads[cur];
-            c.cpu += t0.saturating_sub(c.dispatched_at);
+            let ran = t0.saturating_sub(c.dispatched_at);
+            c.cpu += ran;
+            c.vruntime += ran;
             if c.state == State::Running {
                 c.make_ready(t0, false);
                 c.preempts += 1;
@@ -579,6 +653,22 @@ fn schedule() {
             t.switches_in += 1;
         }
         s.current = next;
+        // Advance the fair floor to the smallest vruntime still in the race
+        // (it never moves backwards).
+        // (Only under `fair`: the other policies must cost exactly what they
+        // did before this policy existed, or old and new results would be
+        // measured on different kernels.)
+        if pol == Policy::Fair {
+            if let Some(m) = s
+                .threads
+                .iter()
+                .filter(|t| t.id != 0 && !t.system && matches!(t.state, State::Ready | State::Running))
+                .map(|t| t.vruntime)
+                .min()
+            {
+                s.min_vruntime = s.min_vruntime.max(m);
+            }
+        }
         let old_ptr = &mut s.threads[cur].saved_rsp as *mut usize;
         old_fx = &mut *s.threads[cur].fx as *mut FxArea;
         (old_ptr, s.threads[next].saved_rsp, s.threads[next].id)
@@ -611,9 +701,13 @@ pub fn on_tick() {
         if s.threads.is_empty() {
             return; // timer runs from boot; the scheduler starts later
         }
+        let minv = s.min_vruntime;
         for t in s.threads.iter_mut() {
             if t.state == State::Sleeping && t.wake_tick <= now_tick {
                 t.make_ready(now, true);
+                if pol == Policy::Fair {
+                    fair_place_woken(t, minv);
+                }
             }
         }
         if matches!(pol, Policy::Mlfq | Policy::HintedMlfq)
@@ -652,8 +746,25 @@ pub fn on_tick() {
                 }
             }
             let my_level = eff_level(&s.threads[cur], pol, now);
-            if s.threads[cur].slice_used >= quantum_for(pol, my_level) {
+            let slice = if pol == Policy::Fair { fair_slice(&s) } else { quantum_for(pol, my_level) };
+            if s.threads[cur].slice_used >= slice {
                 expired = true;
+            }
+            // `fair`: a thread woken since it last ran preempts if it is more
+            // than the wake-up granularity behind; any thread preempts if it
+            // has fallen a whole slice behind.
+            if pol == Policy::Fair && !s.threads[cur].system {
+                let cur_vr = eff_vruntime(&s.threads[cur], now);
+                let gran = ms_cycles(FAIR_WAKEUP_GRAN_MS);
+                let slice_c = ms_cycles(slice);
+                if s.threads.iter().any(|t| {
+                    t.id != 0
+                        && !t.system
+                        && t.state == State::Ready
+                        && ((t.woke && t.vruntime + gran < cur_vr) || t.vruntime + slice_c < cur_vr)
+                }) {
+                    expired = true;
+                }
             }
             // Someone more urgent ready? Under round robin only a system
             // thread counts (round robin has no priorities of its own).
@@ -714,10 +825,15 @@ pub fn wake_all(key: u64) -> usize {
     interrupts::without_interrupts(|| {
         let now = timing::now();
         let mut s = SCHED.lock();
+        let minv = s.min_vruntime;
+        let fair = policy() == Policy::Fair;
         let mut n = 0;
         for t in s.threads.iter_mut() {
             if t.state == State::Blocked && t.block_key == key {
                 t.make_ready(now, true);
+                if fair {
+                    fair_place_woken(t, minv);
+                }
                 n += 1;
             }
         }

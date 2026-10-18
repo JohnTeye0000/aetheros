@@ -1,0 +1,5 @@
+# CFS-style baseline ("fair") across the whole matrix, 10 seeds.
+repeat 10 bench cpu4 fair
+repeat 10 bench mixed fair
+repeat 10 bench interactive fair
+repeat 10 bench all fair

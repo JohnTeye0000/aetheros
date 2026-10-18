@@ -1,0 +1,10 @@
+timing=icount shift=3,sleep=off
+cpu=default
+bin=C:\Users\USER\Downloads\programming roadmap\CLAUDE CODE\aetheros-kernel\target\x86_64-unknown-none\debug\bootimage-aetheros_kernel.bin
+
+# CFS-style baseline ("fair") across the whole matrix, 10 seeds.
+repeat 10 bench cpu4 fair
+repeat 10 bench mixed fair
+repeat 10 bench interactive fair
+repeat 10 bench all fair
+poweroff

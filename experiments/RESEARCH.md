@@ -58,6 +58,7 @@ Sub-questions:
 | **mlfq** (runtime only) | observed behaviour | 3 levels, quantum Q·2^level, demote after using a level's allotment (survives blocking, so it can't be gamed), all threads boosted to the top every 200 ms |
 | **hint** (S1, static only) | the program's declared hint | interactive → level 0, io/none → 1, cpu → 2; a thread waiting > 100 ms is aged to the top (anti-starvation) |
 | **hmlfq** (S2, both) | hint as MLFQ's *starting* level | otherwise identical to `mlfq` |
+| **fair** (added 2026-10-18) | nothing: runtime behaviour only | a CFS-style baseline. Each thread accumulates virtual runtime (CPU time used); the least-served runnable thread runs; a slice is Q / (runnable threads), at least 1 ms; a waking thread is credited for sleeping (up to Q/2) and preempts the running one if it is more than 1 ms behind. No weights or nice levels, one CPU, no deadlines (so not EEVDF) |
 
 ### The workloads
 
@@ -93,7 +94,8 @@ configuration's median; every process exited cleanly). Base quantum 10 ms unless
 stated. "Latency" = p95 wake-up latency of the process class named.
 
 **F1 — Correct hints cut interactive latency by two to three orders of
-magnitude (H1 supported).** Interactive p95 latency is 0.03 ms with `hint`, vs
+magnitude *relative to round robin and MLFQ* (H1 supported against those two
+baselines; see F8 for what happens against a CFS-style one).** Interactive p95 latency is 0.03 ms with `hint`, vs
 10–15 ms under `rr` and 6–15 ms under `mlfq` (workloads `all`, `interactive`).
 It stays under 0.3 ms with 10 CPU-bound competitors (`rr` 85 ms, `mlfq` 45 ms),
 and it doesn't depend on the quantum (2–50 ms), where `rr`/`mlfq` latency grows
@@ -133,6 +135,68 @@ process finish early. Fairness among CPU-bound processes over the run drops
 (Jain index 0.94 in `interactive`, 0.93 in `scale4`, vs 1.00 for `rr`). "No
 hints" isn't the same as round robin: every process lands on the middle level,
 whose quantum is 2×, so latency doubles.
+
+## Revision after adding a CFS-style baseline (2026-10-18)
+
+Finding F2 said runtime inference doesn't recover what hints give. That was
+true of *MLFQ*. It was never tested against the scheduler real systems use.
+After adding `fair` (a CFS-style virtual-runtime scheduler, which uses **no
+hints**) and running it over the same matrix (795 runs in total now, zero
+plausibility warnings), the headline changes. Findings F1-F7 stand as stated
+*against rr and mlfq*, but H1's practical claim does not survive F8.
+
+**F8 — A hint-free CFS-style scheduler matches the hint scheduler on
+interactive latency.** Interactive p95 wake-up latency: `fair` 0.05 ms, `hint`
+0.03 ms, `rr` 10 ms, `mlfq` 6 ms (workload `all`). It holds with ten CPU-bound
+competitors (`fair` 0.09 ms, `hint` 0.25 ms, `rr` 85 ms) and at every quantum
+from 5 to 50 ms (0.05-0.06 ms). At q = 2 ms it is 1.05 ms, because the slice
+floor (1 ms) then limits how fast it can react. The mechanism is the same insight as the hint
+scheduler's, but *measured* instead of declared: a process that has been
+sleeping has used little CPU, so its virtual runtime is small, so it preempts
+the running process. No program had to say what it was.
+
+**F9 — `fair` handles the programs that broke the hint scheduler.** The
+phase-changing PlainLang program (`pl_phase`, F6) saw 70.7 ms p95 latency under
+`hint` and sees 0.05 ms under `fair`. The misclassified program (`pl_trick`, F7)
+doesn't harm its neighbour under `fair`: the genuinely interactive process is
+at 0.05 ms, against 2.88 ms under `hint`. Runtime measurement can't be fooled
+by a wrong label, because it never reads one.
+
+**F10 — Hints still win on cost, and on I/O-bound latency at large
+quanta.** `fair` pays for its fine-grained fairness:
+* *Context switches*: 437 vs 155 (`all`, q = 10 ms), 1,414 vs 89 (`cpu4`),
+  8,064 vs 679 (`scale10`). Each extra switch costs about 0.13 ms of emulated
+  time (`cpu4`: +155 ms makespan over ~1,140 extra switches), and the
+  scheduler's own decision time is 1.2-2.4% of runtime (9% at `scale10`, where
+  the O(n) scan per decision shows).
+* *CPU-bound turnaround*: +14% (`all`), +7% (`cpu4`), +21% (`scale10`) vs `hint`
+  (+4%, +6% and +18% vs round robin).
+* The cost falls as the quantum grows, and the latency benefit doesn't: at
+  q = 50 ms `fair` has 185 switches (vs 145 for `hint`), +2.6% makespan, and
+  0.06 ms interactive latency. So the cost is a tuning choice, not a verdict.
+* But I/O-bound latency does grow with the quantum under `fair` (3.4 ms at
+  q = 10, 9 ms at q = 50) while `hint` stays at 0.35-0.39 ms. That's the one
+  place a declared hint beats measurement in these data: an I/O-style process
+  does ~4.8 ms of work between waits, and `fair` can't tell it from a CPU-bound
+  process until it has consumed CPU.
+
+**What this does to the research question.** "Can compiler-derived hints help
+the scheduler?" has a more defensible answer than before, and a narrower one:
+*hints help relative to textbook schedulers, and relative to a CFS-style one
+only on cost (fewer switches, less scheduler time, ~7-21% better CPU-bound
+turnaround) and on I/O-style latency. They don't help interactive latency,
+where measurement alone is enough.* The interesting open question is the
+combination: use the hint to skip fair's learning period and cut its switching
+(e.g. larger slices for processes hinted `cpu`), while measurement catches wrong
+and stale hints. That policy isn't built; MLFQ-with-hints (`hmlfq`) was the
+wrong vehicle, because MLFQ's demotion erased the hint (F4).
+
+**Caveats specific to this baseline.** `fair` is *my* CFS-style implementation
+(no weights, no nice levels, one CPU, no group scheduling, no EEVDF lag and
+deadlines), not Linux's scheduler. Its wake-up granularity (1 ms) and sleeper
+credit (Q/2) are Linux-like defaults I scaled to this kernel's 1 ms tick, not
+swept. Its numbers could move with those, and with a real CFS/EEVDF the
+switch-count cost might look different.
 
 ## Results: compiler-derived hints (PlainLang workloads)
 
@@ -231,9 +295,11 @@ Devlog 035 has the details. The harness itself had to be debugged:
    for now and should be swept before strong claims are made.
 5. **Small scale.** One CPU, at most 15 processes, seconds-long runs.
 6. **The researcher wrote the baselines.** A hint scheduler beating a weak MLFQ
-   proves little. The MLFQ follows the textbook rules (OSTEP ch. 8), but a
-   reviewer would rightly ask for comparison against a production-style
-   scheduler (e.g. CFS/EEVDF-like fair queuing). That's a known gap.
+   proves little, and F8 shows exactly that happening: against a CFS-style
+   baseline the interactive-latency advantage disappears. The `fair` policy
+   closes the main gap a reviewer would raise, but it's still my approximation
+   of CFS. Comparison against the real Linux scheduler (or at least a more
+   faithful CFS/EEVDF port) remains open.
 
 ## Not done yet (the honest list)
 
@@ -245,7 +311,10 @@ Devlog 035 has the details. The harness itself had to be debugged:
 - [ ] **Hint-classifier accuracy on real programs**, not just five workloads I
   wrote. E.g. classify every PlainLang lesson/example and compare with measured
   behaviour.
-- [ ] **A fair-queuing baseline** (CFS/EEVDF-style) to compare against.
+- [x] **A fair-queuing baseline** (`fair`, CFS-style). It changed the main finding (F8-F10).
+- [ ] **A policy that combines hints with fair queuing** (hint-sized slices, measurement
+  to catch wrong or stale hints). F8-F10 say this is the interesting design.
+- [ ] **Sweeps of `fair`'s own parameters** (wake-up granularity, sleeper credit).
 - [ ] **Sweeps of boost period and aging threshold.**
 - [ ] **Literature review**: reading the papers below and writing down, in your
   own words, what each one did and how this study differs. Needs to be done

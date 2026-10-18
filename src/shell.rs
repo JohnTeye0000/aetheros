@@ -457,7 +457,7 @@ fn dispatch(input: &str) {
             if let Some(p) = it.next() {
                 match crate::scheduler::Policy::parse(p) {
                     Some(pol) => crate::scheduler::set_policy(pol),
-                    None => out("usage: sched [rr|hint|mlfq|hmlfq] [quantum_ms]"),
+                    None => out("usage: sched [rr|hint|mlfq|hmlfq|fair] [quantum_ms]"),
                 }
             }
             if let Some(q) = it.next() {
@@ -467,7 +467,7 @@ fn dispatch(input: &str) {
                 }
             }
             let line = alloc::format!(
-                "scheduler policy: {}  base quantum: {} ms  (policies: rr hint mlfq hmlfq)",
+                "scheduler policy: {}  base quantum: {} ms  (policies: rr hint mlfq hmlfq fair)",
                 crate::scheduler::policy().name(),
                 crate::scheduler::quantum_ms()
             );
@@ -475,7 +475,7 @@ fn dispatch(input: &str) {
         }
         "bench" => {
             if args.is_empty() {
-                out("usage: bench <workload> [rr|hint|mlfq|hmlfq] [q=N] [hints=on|none|wrong] [seed=N]");
+                out("usage: bench <workload> [rr|hint|mlfq|hmlfq|fair] [q=N] [hints=on|none|wrong] [seed=N]");
                 let line = alloc::format!("workloads: {}", crate::bench::WORKLOADS);
                 out(&line);
             } else {

@@ -201,7 +201,7 @@ pub fn parse(args: &str) -> Result<Config, &'static str> {
                 _ => return Err("hints= must be on, none or wrong"),
             };
         } else {
-            return Err("unknown option (policy: rr hint mlfq hmlfq; q=N hints=.. seed=N)");
+            return Err("unknown option (policy: rr hint mlfq hmlfq fair; q=N hints=.. seed=N)");
         }
     }
     Ok(cfg)

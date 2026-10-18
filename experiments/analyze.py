@@ -30,7 +30,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-POLICY_ORDER = ["rr", "mlfq", "hint", "hmlfq"]
+POLICY_ORDER = ["rr", "fair", "mlfq", "hint", "hmlfq"]
 HINT_ORDER = ["on", "none", "wrong"]
 # what each program REALLY is (ground truth by construction), whatever hint it carries
 CLASS_OF = {"wcpu": "cpu", "wio": "io", "wint": "interactive",
