@@ -485,6 +485,42 @@ different conversion. Very short programs (e.g. 0.3 ms of CPU and one wait)
 count as `io` by that rule even though they barely use the CPU. The corpus is
 generated, not real user code.
 
+### Biasing the classifier heavy doesn't fix it (F18)
+
+F17 suggested a cheap fix: make the classifier guess *heavy* when unsure. A new
+`safe` analysis in `plainhint.py` changes two rules. A loop of unknown length is
+assumed to run 10,000 times instead of 100, and an `if` counts the *fewest*
+waits of its branches. The predictions were committed to git *before* the
+analysis was written (`plans/hint_safe_predictions.txt`, commit 6ddd1c7) and
+scored on F17's already-measured programs, so no new kernel runs were needed.
+
+| analysis | agreement | balanced | too light | too heavy |
+|---|---|---|---|---|
+| basic | 62% | 63% | 56 | 1 |
+| counted | **76%** | 76% | 36 | 0 |
+| safe | 59% | 62% | **11** | 50 |
+
+S1 (too-light misses <= 9): **failed**, 11. S2 (agreement >= 61%): **failed**,
+59%. S3 (too-heavy misses mostly from gated waits): **failed**, only 15 of 50.
+Most came from the 10,000-trip assumption, which overshoots as badly as 100
+undershoots. S4 (no measured-cpu program guessed interactive): held.
+
+Some of `safe`'s 11 too-light misses are new and come from the rule itself. A
+program whose only waits are gated gets 0 waits, and if its work is small it
+becomes `none`, the lightest class. A rule that's safe in one dimension
+interacted badly with another.
+
+**What I take from it:** a single bias constant moves errors from one
+direction to the other and doesn't remove them. The errors come from loop
+bounds the analysis can't see, and no constant guess for an unknown bound is
+right for programs whose bounds span four orders of magnitude. The two
+directions do cost different people, though. Under hint-as-priority a too-light
+guess hurts *other* processes (a hog gets priority), while a too-heavy guess
+mostly hurts the *mislabelled program itself* (it loses priority). That
+asymmetry follows from the design but wasn't measured here. So `safe` is a
+defensible choice when protecting neighbours matters more than accuracy. Under
+`hfair` neither direction can hurt neighbours, which is the F9 argument again.
+
 ### What this changes about the research question
 
 The question was "can compiler-derived information help the scheduler?" The
@@ -607,8 +643,10 @@ Devlog 035 has the details. The harness itself had to be debugged:
 - [x] **SSE state save/restore**, verified with a negative control.
 - [x] **Hint-classifier accuracy** on 150 generated programs against measured
   behaviour (F17). Still open: real user programs, not generated ones.
-- [ ] **A safety-biased classifier** (unknowns assumed heavy) to test whether it
-  removes F17's one-directional errors without losing much accuracy.
+- [x] **A safety-biased classifier** (F18): trades errors from one direction to
+  the other, 76% -> 59%. Not a fix.
+- [ ] **Measure the light/heavy cost asymmetry** in the kernel (corpus programs
+  under hint with each analysis's hints, next to real interactive processes).
 - [x] **A fair-queuing baseline** (`fair`, CFS-style). It changed the main finding (F8-F10).
 - [x] **A policy that combines hints with fair queuing** (`hfair`; F9).
 - [x] **Sweeps of boost period and aging threshold** (F11-F13).

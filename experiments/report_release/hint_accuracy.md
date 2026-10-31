@@ -7,6 +7,19 @@
 **A3** [HELD]: 2 gross errors (1%); 2 of them from blind-spot shapes.
 **A4** [FAILED]: 17 of 36 misses are within 3x of the boundary crossed.
 
+## F18: the safety-biased analysis (predictions in plans/hint_safe_predictions.txt)
+
+**S1** [FAILED]: too-light misses: counted 36, safe 11.
+**S2** [FAILED]: safe agrees on 59% (balanced 62%); counted 76%.
+**S3** [FAILED]: too-heavy misses under safe: 50 (15 with gated waits).
+**S4** [HELD]: measured cpu guessed interactive under safe: 0.
+
+| analysis | agreement | balanced | too light | too heavy |
+|---|---|---|---|---|
+| basic | 62% | 63% | 56 | 1 |
+| counted | 76% | 76% | 36 | 0 |
+| safe | 59% | 62% | 11 | 50 |
+
 ## Confusion matrix, counted analysis (rows: measured, columns: static guess)
 
 | measured \ guess | cpu | io | interactive | none |
@@ -15,6 +28,15 @@
 | io | 0 | 33 | 25 | 0 |
 | interactive | 0 | 0 | 59 | 0 |
 | none | 0 | 0 | 0 | 12 |
+
+## Confusion matrix, safe analysis (rows: measured, columns: static guess)
+
+| measured \ guess | cpu | io | interactive | none |
+|---|---|---|---|---|
+| cpu | 20 | 1 | 0 | 0 |
+| io | 9 | 43 | 0 | 6 |
+| interactive | 7 | 27 | 21 | 4 |
+| none | 7 | 0 | 0 | 5 |
 
 ## Confusion matrix, basic analysis (rows: measured, columns: static guess)
 
