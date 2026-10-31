@@ -1,0 +1,10 @@
+# Regression check after adding the levels= and floor= knobs (defaults equal
+# the old constants). Same lines and seeds as main_all / fair_main / hfair_main
+# (seeds 1-3); compare_runs.py checks every run matches the old image's run.
+repeat 3 bench all rr
+repeat 3 bench all mlfq
+repeat 3 bench all hint
+repeat 3 bench all hmlfq
+repeat 3 bench all hint hints=wrong
+repeat 3 bench all fair
+repeat 3 bench all hfair
