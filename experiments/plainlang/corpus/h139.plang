@@ -1,0 +1,8 @@
+count ra from 1 to 9
+set sa to 0
+repeat 381 times
+set sa to sa plus 1
+end
+wait 0.008
+end
+say "done"

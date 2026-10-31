@@ -1,0 +1,21 @@
+count ra from 1 to 24
+set sa to 0
+set xa to 0
+set ya to 0
+while ya is less than 1940
+set xa to xa plus 1
+set ya to xa
+end
+wait 0.008
+end
+count rb from 1 to 32
+set sb to 0
+set xb to 0
+set yb to 0
+while yb is less than 34
+set xb to xb plus 1
+set yb to xb
+end
+wait 0.015
+end
+say "done"

@@ -1,0 +1,20 @@
+count ra from 1 to 19
+set sa to 0
+set xa to 0
+set ya to 0
+while ya is less than 12745
+set xa to xa plus 1
+set ya to xa
+end
+wait 0.004
+end
+count rb from 1 to 30
+set sb to 0
+set xb to 0
+while xb is less than 1646
+set xb to xb plus 1
+set sb to sb plus xb
+end
+wait 0.004
+end
+say "done"

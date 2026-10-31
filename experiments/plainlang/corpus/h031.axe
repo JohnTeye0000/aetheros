@@ -1,0 +1,84 @@
+AXE1
+# h031.axe - compiled from PlainLang by plainaxe
+# analysis: counted
+# estimated work: ~22,108 operations; estimated waits: 31
+# ~713 operations of work per wait
+# <= 2,000 per wait: mostly waiting, brief bursts -> interactive
+# note: a 'while' loop's length can't be known statically (the loop bound isn't a known constant); assumed 100 iterations
+hint=interactive
+48 81 ec 20 00 00 00 49 89 e7 55 48 89 e5 48 81
+ec 18 00 00 00 48 89 e7 b9 03 00 00 00 31 c0 f3
+48 ab 48 b8 00 00 00 00 00 00 f0 3f 66 48 0f 6e
+c0 f2 0f 11 85 f8 ff ff ff 48 b8 00 00 00 00 00
+00 3f 40 66 48 0f 6e c0 f2 0f 11 85 f0 ff ff ff
+f2 0f 10 c8 f2 0f 10 85 f8 ff ff ff 66 0f 2e c1
+0f 87 14 00 00 00 48 b8 00 00 00 00 00 00 f0 3f
+66 48 0f 6e c0 e9 0f 00 00 00 48 b8 00 00 00 00
+00 00 f0 bf 66 48 0f 6e c0 f2 0f 11 85 e8 ff ff
+ff f2 0f 10 85 f0 ff ff ff f2 0f 10 c8 f2 0f 10
+85 f8 ff ff ff f2 0f 5c c1 f2 0f 59 85 e8 ff ff
+ff 66 0f 57 c9 66 0f 2e c1 0f 87 74 01 00 00 f2
+0f 10 85 f8 ff ff ff f2 41 0f 11 87 00 00 00 00
+48 b8 00 00 00 00 00 00 00 00 66 48 0f 6e c0 f2
+41 0f 11 87 08 00 00 00 48 b8 00 00 00 00 00 00
+18 40 66 48 0f 6e c0 48 83 ec 08 f2 0f 11 04 24
+e8 60 01 00 00 48 81 c4 08 00 00 00 f2 41 0f 11
+87 10 00 00 00 48 b8 00 00 00 00 00 00 00 00 66
+48 0f 6e c0 f2 41 0f 11 87 18 00 00 00 f2 41 0f
+10 87 18 00 00 00 48 83 ec 08 f2 0f 11 04 24 f2
+41 0f 10 87 10 00 00 00 f2 0f 10 c8 f2 0f 10 04
+24 48 83 c4 08 66 0f 2e c1 0f 92 c0 0f b6 c0 f2
+48 0f 2a c0 66 0f 57 c9 66 0f 2e c1 0f 84 45 00
+00 00 f2 41 0f 10 87 18 00 00 00 48 83 ec 08 f2
+0f 11 04 24 48 b8 00 00 00 00 00 00 f0 3f 66 48
+0f 6e c0 f2 0f 10 c8 f2 0f 10 04 24 48 83 c4 08
+f2 0f 58 c1 e8 3a 01 00 00 f2 41 0f 11 87 18 00
+00 00 e9 76 ff ff ff 48 b8 fc a9 f1 d2 4d 62 70
+3f 66 48 0f 6e c0 48 b8 00 00 00 00 00 40 8f 40
+66 48 0f 6e c8 f2 0f 59 c1 f2 48 0f 2c d8 48 81
+fb 10 27 00 00 0f 8e 18 00 00 00 bf 10 27 00 00
+b8 04 00 00 00 cd 80 48 81 eb 10 27 00 00 e9 db
+ff ff ff 48 85 db 0f 8e 0a 00 00 00 48 89 df b8
+04 00 00 00 cd 80 f2 0f 10 85 f8 ff ff ff f2 0f
+58 85 e8 ff ff ff f2 0f 11 85 f8 ff ff ff e9 5e
+fe ff ff 48 8d 3d e2 01 00 00 be 04 00 00 00 b8
+01 00 00 00 cd 80 48 8d 3d d3 01 00 00 be 01 00
+00 00 b8 01 00 00 00 cd 80 bf 00 00 00 00 b8 00
+00 00 00 cd 80 55 48 89 e5 48 81 ec 00 00 00 00
+48 89 e7 b9 00 00 00 00 31 c0 f3 48 ab f2 0f 10
+85 10 00 00 00 c9 c3 66 0f 57 c0 c9 c3 b8 01 00
+00 00 cd 80 bf 01 00 00 00 b8 00 00 00 00 cd 80
+66 48 0f 7e c7 b8 0d 00 00 00 cd 80 c3 66 0f 57
+c9 66 0f 2e c1 0f 84 14 00 00 00 48 8d 3d 5f 01
+00 00 be 04 00 00 00 b8 01 00 00 00 cd 80 c3 48
+8d 3d 4f 01 00 00 be 05 00 00 00 b8 01 00 00 00
+cd 80 c3 66 48 0f 7e c0 48 89 c1 48 c1 e9 34 81
+e1 ff 07 00 00 81 f9 ff 07 00 00 0f 85 11 00 00
+00 48 8d 3d 22 01 00 00 be 41 00 00 00 e8 7b ff
+ff ff c3 66 48 0f 7e c0 48 89 c1 48 c1 e9 34 81
+e1 ff 07 00 00 81 f9 33 04 00 00 0f 83 0a 00 00
+00 f2 48 0f 2c c0 f2 48 0f 2a c0 c3 f2 0f 10 d8
+e8 ce ff ff ff 66 0f 2e c3 0f 86 13 00 00 00 48
+b8 00 00 00 00 00 00 f0 3f 66 48 0f 6e c8 f2 0f
+5c c1 c3 f2 0f 10 d8 e8 a7 ff ff ff 66 0f 2e c3
+0f 83 13 00 00 00 48 b8 00 00 00 00 00 00 f0 3f
+66 48 0f 6e c8 f2 0f 58 c1 c3 f2 0f 10 d8 f2 0f
+10 d1 f2 0f 10 c1 e8 78 ff ff ff 66 0f 2e c2 0f
+85 66 00 00 00 f2 48 0f 2c da 48 89 da 48 85 db
+0f 89 03 00 00 00 48 f7 db 48 b8 00 00 00 00 00
+00 f0 3f 66 48 0f 6e c0 48 85 db 0f 84 19 00 00
+00 f6 c3 01 0f 84 04 00 00 00 f2 0f 59 c3 f2 0f
+59 db 48 d1 eb e9 de ff ff ff 48 85 d2 0f 89 17
+00 00 00 48 b8 00 00 00 00 00 00 f0 3f 66 48 0f
+6e c8 f2 0f 5e c8 f2 0f 10 c1 c3 48 8d 3d 59 00
+00 00 be 53 00 00 00 e8 71 fe ff ff 64 6f 6e 65
+0a 74 72 75 65 66 61 6c 73 65 21 21 50 4c 41 49
+4e 4c 41 4e 47 2d 45 52 52 4f 52 3a 20 54 68 61
+74 20 6e 75 6d 62 65 72 20 69 73 20 74 6f 6f 20
+62 69 67 20 66 6f 72 20 50 6c 61 69 6e 4c 61 6e
+67 20 74 6f 20 68 6f 6c 64 2e 0a 21 21 50 4c 41
+49 4e 4c 41 4e 47 2d 45 52 52 4f 52 3a 20 46 72
+61 63 74 69 6f 6e 61 6c 20 70 6f 77 65 72 73 20
+61 72 65 6e 27 74 20 73 75 70 70 6f 72 74 65 64
+20 62 79 20 74 68 65 20 41 65 74 68 65 72 4f 53
+20 62 61 63 6b 65 6e 64 20 79 65 74 2e 0a

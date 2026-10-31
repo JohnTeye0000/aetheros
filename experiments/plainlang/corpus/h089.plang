@@ -1,0 +1,19 @@
+define bounda with a
+return a
+end
+count ra from 1 to 31
+set sa to 0
+set na to bounda with 30
+set xa to 0
+while xa is less than na
+set xa to xa plus 1
+end
+wait 0.015
+end
+count rb from 1 to 16
+set sb to 0
+repeat 5 times
+set sb to sb plus 1
+end
+end
+say "done"

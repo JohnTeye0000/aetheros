@@ -1,0 +1,18 @@
+count ra from 1 to 19
+set sa to 0
+repeat 3115 times
+set sa to sa plus 1
+end
+wait 0.008
+end
+count rb from 1 to 9
+set sb to 0
+set xb to 0
+set yb to 0
+while yb is less than 41
+set xb to xb plus 1
+set yb to xb
+end
+wait 0.015
+end
+say "done"

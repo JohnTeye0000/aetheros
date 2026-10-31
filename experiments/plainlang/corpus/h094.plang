@@ -1,0 +1,19 @@
+count ra from 1 to 14
+set sa to 0
+set xa to 0
+set ya to 0
+while ya is less than 122
+set xa to xa plus 1
+set ya to xa
+end
+wait 0.002
+end
+count rb from 1 to 39
+set sb to 0
+set xb to 0
+while xb is less than 19
+set xb to xb plus 1
+set sb to sb plus xb
+end
+end
+say "done"

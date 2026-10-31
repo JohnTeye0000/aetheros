@@ -1,0 +1,8 @@
+count ra from 1 to 38
+set sa to 0
+count ia from 1 to 5598
+set sa to sa plus ia
+end
+wait 0.015
+end
+say "done"

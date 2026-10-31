@@ -1,0 +1,10 @@
+count ra from 1 to 34
+set sa to 0
+repeat 25 times
+set sa to sa plus 1
+end
+if remainder of ra and 2 is 0 then
+wait 0.015
+end
+end
+say "done"

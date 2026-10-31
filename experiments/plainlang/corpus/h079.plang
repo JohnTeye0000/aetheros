@@ -1,0 +1,22 @@
+define boundb with a
+return a
+end
+count ra from 1 to 30
+set sa to 0
+set xa to 0
+while xa is less than 85
+set xa to xa plus 1
+set sa to sa plus xa
+end
+wait 0.002
+end
+count rb from 1 to 20
+set sb to 0
+set nb to boundb with 7557
+set xb to 0
+while xb is less than nb
+set xb to xb plus 1
+end
+wait 0.008
+end
+say "done"

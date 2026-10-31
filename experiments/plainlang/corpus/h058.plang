@@ -1,0 +1,10 @@
+count ra from 1 to 30
+set sa to 0
+repeat 4358 times
+set sa to sa plus 1
+end
+if remainder of ra and 2 is 0 then
+wait 0.004
+end
+end
+say "done"

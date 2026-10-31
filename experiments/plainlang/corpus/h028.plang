@@ -1,0 +1,22 @@
+define bounda with a
+return a
+end
+count ra from 1 to 4
+set sa to 0
+set na to bounda with 8
+set xa to 0
+while xa is less than na
+set xa to xa plus 1
+end
+if remainder of ra and 2 is 0 then
+wait 0.004
+end
+end
+count rb from 1 to 36
+set sb to 0
+count ib from 1 to 8968
+set sb to sb plus ib
+end
+wait 0.004
+end
+say "done"

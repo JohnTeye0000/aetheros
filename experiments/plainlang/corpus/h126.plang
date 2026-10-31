@@ -1,0 +1,15 @@
+define bounda with a
+return a
+end
+count ra from 1 to 27
+set sa to 0
+set na to bounda with 1398
+set xa to 0
+while xa is less than na
+set xa to xa plus 1
+end
+if remainder of ra and 5 is 0 then
+wait 0.015
+end
+end
+say "done"

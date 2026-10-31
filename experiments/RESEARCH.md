@@ -408,6 +408,83 @@ What the random workloads support:
   process's burst, and the comparison has to be made on p90 or on the fraction
   of delayed wake-ups, not on p95 against a fixed threshold.
 
+### Testing the after-the-fact explanation (F16)
+
+The tick-collision story above was invented after seeing the failures, so it
+got its own run with predictions written first (`plans/collisions.txt`,
+99 runs, scored by `collisions.py`, report `report_release/collisions.md`).
+All four held:
+
+* **C1, C2. The floor belongs to the workload, not the scheduler.** With *no*
+  other processes at all, 2 interactive processes have 3.3% of wake-ups
+  delayed and 3 have 5.6-5.8%, under every one of rr, mlfq, fair, hint and
+  hfair (one interactive process: 0.0%). The delay is ~0.48 ms, one sibling's
+  burst. p95 is 0-1 us for two and ~485 us for three, again under every
+  policy.
+* **C3. hint's extra latency in the random mixes with <= 2 interactive
+  processes is all aging.** With aging off, p95 falls from 0.33-2.7 ms to
+  3-4 us in all five such mixes.
+* **C4. In three-interactive mixes it isn't aging.** With aging off, hint
+  stays at 486-493 us: the C1 floor.
+
+One correction to my own estimate: the delayed fractions are not random.
+They are exactly 1 wake-up in 30 per colliding pair in every seed, because the
+seed doesn't move the interactive processes' phases. The mechanism (same-tick
+wake-ups) is what C1-C2 establish. The "probability" arithmetic just happened
+to land near the right number.
+
+**Consequence for every result above:** p95 interactive latency is a fair
+summary only with one interactive process. With several, every policy
+shares a floor set by tick quantization, and policies should be compared above
+that floor (p90, or delayed fraction minus the C1 floor).
+
+### How often is the compiler right? (F17)
+
+Five hand-written programs say little about a classifier. `gen_hint_corpus.py`
+draws 150 PlainLang programs from a fixed seed. They combine `repeat`/`count`
+loops, counted `while` loops, `while` loops with an aliased counter, loop
+bounds returned by a function, waits gated by an `if`, and two-phase programs.
+Each one is compiled with `plainaxe.py`. Its static hint is recorded under
+both analyses, and then it runs *alone* under `fair`, where its measured CPU
+time per wait is the ground truth. Thresholds and predictions are in
+`plans/hint_corpus.txt`. Scored by `hint_accuracy.py`, report
+`report_release/hint_accuracy.md`.
+
+| prediction | result |
+|---|---|
+| A1 counted analysis agrees with measurement on >= 70% | held: **76%** (balanced 76%) |
+| A2 counted beats basic by >= 10 points | held: 76% vs **62%** |
+| A3 gross errors (cpu <-> interactive) < 10%, mostly from blind-spot shapes | held: **2 of 150**, both from blind-spot shapes |
+| A4 at least half the misses lie within 3x of the boundary crossed | **failed**: 17 of 36 |
+
+Accuracy by shape: counted `while` 97%, `repeat` 91%, `count` 82%; the
+documented blind spots are clearly worse: function-bound bounds 67%, gated
+waits 62%, aliased counters 53%.
+
+**The finding I didn't predict: all 36 misses go the same way.** Every wrong
+guess is *lighter* than the truth (cpu guessed as io/interactive/none, io
+guessed as interactive). Nothing measured lighter was ever guessed heavier. Two
+rules in the classifier do this. A loop it can't count is assumed to run 100
+times, and this corpus's loops usually run more. A gated wait is counted as if
+it happened on every iteration, which overstates waits and understates work per
+wait. The size of the bias depends on the corpus (trip counts here are
+log-uniform from 5 to 60,000), but its direction follows from the rules.
+
+**Why this matters for scheduling:** a lighter-than-true hint is exactly the
+harmful kind under hint-as-priority. A CPU-heavy program labelled interactive
+is the F4/F6 failure (interactive neighbours delayed by 10-100 ms). Under
+`hfair` a too-light hint only shortens that program's own slices. So the
+classifier's errors land precisely where the hint-as-priority design is
+fragile. That makes F9's design argument stronger, and it suggests a cheap
+fix to test: bias unknowns *heavier* (assume more trips, count gated waits as
+rarer), trading accuracy for safety.
+
+Caveats: the ground-truth thresholds are the classifier's own, converted at
+its documented ~40 ns per operation, so near-boundary programs could flip with a
+different conversion. Very short programs (e.g. 0.3 ms of CPU and one wait)
+count as `io` by that rule even though they barely use the CPU. The corpus is
+generated, not real user code.
+
 ### What this changes about the research question
 
 The question was "can compiler-derived information help the scheduler?" The
@@ -443,6 +520,11 @@ cargo bootimage --release
 experiments/run_all.sh target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin \
                        experiments/results/release 6
 python experiments/analyze.py experiments/results/release/*/ --out experiments/report_release
+
+# The classifier-accuracy corpus (F17) needs its own program files:
+python experiments/gen_hint_corpus.py          # needs ../plainlang
+python experiments/aetherbench.py --script experiments/plans/hint_corpus.txt        --out experiments/results/release/hint_corpus        --bin target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin        --files experiments/plainlang/corpus/*.axe
+python experiments/hint_accuracy.py experiments/results/release/hint_corpus        --out experiments/report_release/hint_accuracy.md
 
 # Or one plan on either build (drop --bin for the debug kernel):
 python experiments/aetherbench.py --script experiments/plans/main_all.txt \
@@ -523,15 +605,16 @@ Devlog 035 has the details. The harness itself had to be debugged:
 - [x] **Compiler-derived hints** (`plainhint.py`), with a written rationale per
   program.
 - [x] **SSE state save/restore**, verified with a negative control.
-- [ ] **Hint-classifier accuracy on real programs**, not just five workloads I
-  wrote. E.g. classify every PlainLang lesson/example and compare with measured
-  behaviour.
+- [x] **Hint-classifier accuracy** on 150 generated programs against measured
+  behaviour (F17). Still open: real user programs, not generated ones.
+- [ ] **A safety-biased classifier** (unknowns assumed heavy) to test whether it
+  removes F17's one-directional errors without losing much accuracy.
 - [x] **A fair-queuing baseline** (`fair`, CFS-style). It changed the main finding (F8-F10).
 - [x] **A policy that combines hints with fair queuing** (`hfair`; F9).
 - [x] **Sweeps of boost period and aging threshold** (F11-F13).
 - [x] **`fair`'s wake-up granularity and sleeper credit** (F14: insensitive).
 - [x] **Random, unpicked workloads** with pre-registered predictions (F15).
-- [ ] **Separate tie-queuing from aging** in hint's random-mix latency (F15).
+- [x] **Separate tie-queuing from aging** in hint's random-mix latency (F16: it's aging, plus the tick floor).
 - [ ] **Sweep the remaining constants** (MLFQ levels, hint-to-level mapping, `hint`'s quantum scaling, `fair`'s 1 ms slice floor).
 - [ ] **Report starvation properly**: response time and max latency alongside p95 for every class, in the main tables, and re-read F1-F10 with that in mind.
 - [ ] **Literature review**: reading the papers below and writing down, in your

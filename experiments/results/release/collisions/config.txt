@@ -1,0 +1,49 @@
+timing=icount shift=3,sleep=off
+cpu=default
+bin=target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin
+
+# Testing the explanation for F15's failures. WRITTEN BEFORE RUNNING.
+#
+# Post-hoc explanation from random_mix2: interactive processes whose wake-ups
+# land in the same 1 ms timer tick queue behind each other whatever the
+# scheduler, so ~3% (two interactive) / ~6% (three) of wake-ups are delayed by
+# one sibling's burst. If that is right:
+#   C1. With NO other processes (mix2:0,0,I) every policy -- rr, mlfq, fair,
+#       hint, hfair -- shows the same floor: 0% of wake-ups over 100 us for
+#       I=1, 1.5-5% for I=2, 3-8% for I=3. p95 <= 100 us for I=1 and I=2,
+#       > 100 us for I=3, under every policy.
+#   C2. The policies' delayed fractions at a given I differ by at most 2
+#       percentage points (the floor is the workload's, not the scheduler's).
+# And for hint's poor random-mix latency with correct hints (0.33-2.7 ms):
+#   C3. In the mixes with <= 2 interactive processes and >= 6 CPU-bound ones
+#       (6;0;2 7;2;2 8;0;2 8;2;1 8;3;2) turning aging off (aging=100000) brings
+#       hint's interactive p95 to <= 100 us. That would make aging (F11), not
+#       ties, the cause there.
+#   C4. In the three-interactive mixes (1;1;3 4;3;3 8;1;3) hint with aging off
+#       stays above 100 us (the collision floor of C1), i.e. aging is not the
+#       whole story there.
+# Scored by experiments/collisions.py. Failures get reported as failures.
+repeat 5 bench mix2:0,0,1 rr
+repeat 5 bench mix2:0,0,1 mlfq
+repeat 5 bench mix2:0,0,1 fair
+repeat 5 bench mix2:0,0,1 hint
+repeat 5 bench mix2:0,0,1 hfair
+repeat 5 bench mix2:0,0,2 rr
+repeat 5 bench mix2:0,0,2 mlfq
+repeat 5 bench mix2:0,0,2 fair
+repeat 5 bench mix2:0,0,2 hint
+repeat 5 bench mix2:0,0,2 hfair
+repeat 5 bench mix2:0,0,3 rr
+repeat 5 bench mix2:0,0,3 mlfq
+repeat 5 bench mix2:0,0,3 fair
+repeat 5 bench mix2:0,0,3 hint
+repeat 5 bench mix2:0,0,3 hfair
+repeat 3 bench mix2:6,0,2 hint aging=100000
+repeat 3 bench mix2:7,2,2 hint aging=100000
+repeat 3 bench mix2:8,0,2 hint aging=100000
+repeat 3 bench mix2:8,2,1 hint aging=100000
+repeat 3 bench mix2:8,3,2 hint aging=100000
+repeat 3 bench mix2:1,1,3 hint aging=100000
+repeat 3 bench mix2:4,3,3 hint aging=100000
+repeat 3 bench mix2:8,1,3 hint aging=100000
+poweroff

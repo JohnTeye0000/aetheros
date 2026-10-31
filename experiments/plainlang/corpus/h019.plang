@@ -1,0 +1,10 @@
+count ra from 1 to 35
+set sa to 0
+repeat 111 times
+set sa to sa plus 1
+end
+if remainder of ra and 3 is 0 then
+wait 0.004
+end
+end
+say "done"

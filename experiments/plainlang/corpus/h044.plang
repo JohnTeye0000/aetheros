@@ -1,0 +1,8 @@
+count ra from 1 to 34
+set sa to 0
+repeat 8834 times
+set sa to sa plus 1
+end
+wait 0.015
+end
+say "done"

@@ -1,0 +1,11 @@
+count ra from 1 to 3
+set sa to 0
+set xa to 0
+set ya to 0
+while ya is less than 4859
+set xa to xa plus 1
+set ya to xa
+end
+wait 0.015
+end
+say "done"

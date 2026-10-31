@@ -1,0 +1,8 @@
+count ra from 1 to 11
+set sa to 0
+count ia from 1 to 216
+set sa to sa plus ia
+end
+wait 0.002
+end
+say "done"

@@ -1,0 +1,12 @@
+count ra from 1 to 28
+set sa to 0
+set xa to 0
+while xa is less than 10766
+set xa to xa plus 1
+set sa to sa plus xa
+end
+if remainder of ra and 4 is 0 then
+wait 0.004
+end
+end
+say "done"

@@ -1,0 +1,20 @@
+define bounda with a
+return a
+end
+count ra from 1 to 10
+set sa to 0
+set na to bounda with 86
+set xa to 0
+while xa is less than na
+set xa to xa plus 1
+end
+wait 0.002
+end
+count rb from 1 to 10
+set sb to 0
+count ib from 1 to 1539
+set sb to sb plus ib
+end
+wait 0.008
+end
+say "done"

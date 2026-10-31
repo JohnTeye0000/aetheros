@@ -1,0 +1,22 @@
+count ra from 1 to 6
+set sa to 0
+set xa to 0
+while xa is less than 18
+set xa to xa plus 1
+set sa to sa plus xa
+end
+wait 0.002
+end
+count rb from 1 to 24
+set sb to 0
+set xb to 0
+set yb to 0
+while yb is less than 5
+set xb to xb plus 1
+set yb to xb
+end
+if remainder of rb and 5 is 0 then
+wait 0.002
+end
+end
+say "done"

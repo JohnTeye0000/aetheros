@@ -1,0 +1,10 @@
+count ra from 1 to 27
+set sa to 0
+count ia from 1 to 164
+set sa to sa plus ia
+end
+if remainder of ra and 5 is 0 then
+wait 0.002
+end
+end
+say "done"

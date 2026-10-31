@@ -1,0 +1,13 @@
+define bounda with a
+return a
+end
+count ra from 1 to 37
+set sa to 0
+set na to bounda with 234
+set xa to 0
+while xa is less than na
+set xa to xa plus 1
+end
+wait 0.002
+end
+say "done"

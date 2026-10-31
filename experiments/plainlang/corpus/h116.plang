@@ -1,0 +1,18 @@
+define boundb with a
+return a
+end
+count ra from 1 to 12
+set sa to 0
+repeat 5 times
+set sa to sa plus 1
+end
+end
+count rb from 1 to 21
+set sb to 0
+set nb to boundb with 24
+set xb to 0
+while xb is less than nb
+set xb to xb plus 1
+end
+end
+say "done"

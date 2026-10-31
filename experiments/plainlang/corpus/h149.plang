@@ -1,0 +1,23 @@
+define boundb with a
+return a
+end
+count ra from 1 to 10
+set sa to 0
+set xa to 0
+set ya to 0
+while ya is less than 1239
+set xa to xa plus 1
+set ya to xa
+end
+wait 0.004
+end
+count rb from 1 to 33
+set sb to 0
+set nb to boundb with 726
+set xb to 0
+while xb is less than nb
+set xb to xb plus 1
+end
+wait 0.015
+end
+say "done"

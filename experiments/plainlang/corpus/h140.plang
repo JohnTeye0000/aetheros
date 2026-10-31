@@ -1,0 +1,7 @@
+count ra from 1 to 17
+set sa to 0
+repeat 257 times
+set sa to sa plus 1
+end
+end
+say "done"

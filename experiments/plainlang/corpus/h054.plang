@@ -1,0 +1,18 @@
+count ra from 1 to 38
+set sa to 0
+count ia from 1 to 18
+set sa to sa plus ia
+end
+wait 0.015
+end
+count rb from 1 to 28
+set sb to 0
+set xb to 0
+set yb to 0
+while yb is less than 7
+set xb to xb plus 1
+set yb to xb
+end
+wait 0.008
+end
+say "done"

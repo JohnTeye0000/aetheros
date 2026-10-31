@@ -1,0 +1,19 @@
+count ra from 1 to 11
+set sa to 0
+repeat 20 times
+set sa to sa plus 1
+end
+if remainder of ra and 5 is 0 then
+wait 0.002
+end
+end
+count rb from 1 to 6
+set sb to 0
+set xb to 0
+set yb to 0
+while yb is less than 2614
+set xb to xb plus 1
+set yb to xb
+end
+end
+say "done"

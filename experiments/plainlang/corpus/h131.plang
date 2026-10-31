@@ -1,0 +1,25 @@
+define bounda with a
+return a
+end
+define boundb with a
+return a
+end
+count ra from 1 to 4
+set sa to 0
+set na to bounda with 184
+set xa to 0
+while xa is less than na
+set xa to xa plus 1
+end
+wait 0.002
+end
+count rb from 1 to 32
+set sb to 0
+set nb to boundb with 17
+set xb to 0
+while xb is less than nb
+set xb to xb plus 1
+end
+wait 0.008
+end
+say "done"

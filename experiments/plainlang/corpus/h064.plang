@@ -1,0 +1,13 @@
+count ra from 1 to 37
+set sa to 0
+set xa to 0
+set ya to 0
+while ya is less than 93
+set xa to xa plus 1
+set ya to xa
+end
+if remainder of ra and 4 is 0 then
+wait 0.008
+end
+end
+say "done"

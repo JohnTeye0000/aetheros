@@ -1,0 +1,8 @@
+count ra from 1 to 14
+set sa to 0
+repeat 74 times
+set sa to sa plus 1
+end
+wait 0.015
+end
+say "done"

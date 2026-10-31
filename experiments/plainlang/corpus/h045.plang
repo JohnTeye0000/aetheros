@@ -1,0 +1,7 @@
+count ra from 1 to 13
+set sa to 0
+count ia from 1 to 22
+set sa to sa plus ia
+end
+end
+say "done"

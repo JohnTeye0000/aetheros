@@ -1,0 +1,10 @@
+count ra from 1 to 7
+set sa to 0
+set xa to 0
+while xa is less than 10883
+set xa to xa plus 1
+set sa to sa plus xa
+end
+wait 0.015
+end
+say "done"

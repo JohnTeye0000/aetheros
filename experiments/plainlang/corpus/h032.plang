@@ -1,0 +1,19 @@
+count ra from 1 to 32
+set sa to 0
+set xa to 0
+while xa is less than 1921
+set xa to xa plus 1
+set sa to sa plus xa
+end
+wait 0.008
+end
+count rb from 1 to 26
+set sb to 0
+repeat 119 times
+set sb to sb plus 1
+end
+if remainder of rb and 2 is 0 then
+wait 0.002
+end
+end
+say "done"

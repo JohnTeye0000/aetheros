@@ -1,0 +1,8 @@
+count ra from 1 to 32
+set sa to 0
+repeat 213 times
+set sa to sa plus 1
+end
+wait 0.004
+end
+say "done"
