@@ -1,0 +1,16 @@
+# F18: a safety-biased hint classifier. PREDICTIONS, COMMITTED BEFORE THE
+# ANALYSIS EXISTS (git history is the timestamp). No new kernel runs: the
+# programs' measured classes from hint_corpus (F17) are the ground truth.
+#
+# F17 found every one of counted analysis's 36 misses was TOO LIGHT, the
+# harmful direction under hint-as-priority. The new `safe` analysis in
+# plainhint.py changes two rules, nothing else:
+#   - a loop whose length isn't known is assumed to run 10,000 times (not 100);
+#   - an `if` counts the FEWEST waits of its branches (a lower bound; an `if`
+#     without `otherwise` therefore counts 0), while work still takes the most.
+# Predictions on the same 150 programs:
+#   S1. too-light misses fall from 36 to <= 9.
+#   S2. overall agreement stays >= 61% (at most 15 points below counted's 76%).
+#   S3. too-heavy misses appear (>= 5), mostly in programs with gated waits.
+#   S4. gross too-light errors (measured cpu, guessed interactive): 0.
+# This file has no bench lines; scoring is hint_accuracy.py --compare safe.
