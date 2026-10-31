@@ -1,0 +1,30 @@
+timing=icount shift=3,sleep=off
+cpu=default
+bin=target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin
+
+# The hint scheduler's last fixed choices: slice scaling (Q << level) and the
+# hint-to-level map (io below interactive). 5 seeds. Defaults are rerun first
+# as a regression check against main_all/main_cpu4/main_mixed.
+# PREDICTIONS, WRITTEN BEFORE RUNNING (reference values: hint switches cpu4 86,
+# all 153; interactive p95 all 2 us; io p95 all 0.62 ms, mixed 1.8 ms):
+#   H1. hscale=0 (every level gets Q): cpu4 switches rise to rr's level
+#       (268 +-15%), because all four threads sit on level 2 with 10 ms slices.
+#   H2. hscale=0 leaves interactive p95 in `all` <= 10 us and makespan within 1%
+#       of default hint in every workload.
+#   H3. iotop=1 (io shares the interactive level): io p95 falls below the
+#       default's in both `all` and `mixed`.
+#   H4. iotop=1 raises interactive p95 in `all` above 100 us (the interactive
+#       process now queues behind ~4.8 ms io bursts at equal priority), while
+#       staying below rr's 9.8 ms.
+repeat 5 bench cpu4 hint
+repeat 5 bench all hint
+repeat 5 bench mixed hint
+repeat 5 bench cpu4 hint hscale=0
+repeat 5 bench all hint hscale=0
+repeat 5 bench mixed hint hscale=0
+repeat 5 bench scale10 hint hscale=0
+repeat 5 bench scale10 hint
+repeat 5 bench all hint iotop=1
+repeat 5 bench mixed hint iotop=1
+repeat 5 bench all hint hscale=0 iotop=1
+poweroff

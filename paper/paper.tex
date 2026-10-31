@@ -203,6 +203,10 @@ throughput gain. One qualification matters: \pol{fair}'s switch count is itself 
 minimum slice. Raising that floor from 1 to 5\ms{} cut switches to $0.21\times$ with
 interactive latency unchanged (3--6\us). Hints therefore buy switch savings \emph{without}
 lengthening every slice, not savings that are unavailable any other way.
+The same holds inside \pol{hint}: with equal slices at every level, its switch count on
+four CPU-bound programs rose from 85 to 267, matching round robin (268). The entire
+switch advantage comes from \emph{which} threads receive long slices, not from priority.
+That is precisely the part \pol{hfair} retains.
 
 \begin{table}[t]
 \centering\small

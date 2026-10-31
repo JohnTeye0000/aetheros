@@ -134,6 +134,10 @@ pub struct Config {
     pub levels: u8,
     /// `fair`/`hfair`: shortest slice (ms).
     pub floor: u64,
+    /// `hint`: slices grow with level (`hscale=0` makes them all Q).
+    pub hscale: bool,
+    /// `hint`: io-hinted threads share the interactive level (`iotop=1`).
+    pub iotop: bool,
 }
 
 pub const WORKLOADS: &str = "cpu4  mixed  interactive  all  scale<N>  mix:C,W,I  mix2:C,W,I  fpu  files:a.axe+b.axe+...";
@@ -236,6 +240,8 @@ pub fn parse(args: &str) -> Result<Config, &'static str> {
         lag: scheduler::DEFAULT_FAIR_SLICE_LAG,
         levels: scheduler::DEFAULT_MLFQ_LEVELS,
         floor: scheduler::DEFAULT_FAIR_FLOOR_MS,
+        hscale: true,
+        iotop: false,
     };
     for tok in it {
         // `hfair8` = hfair with an 8x slice multiplier; plain `hfair` = default.
@@ -254,6 +260,10 @@ pub fn parse(args: &str) -> Result<Config, &'static str> {
             cfg.levels = v.parse().ok().filter(|n| (1..=8).contains(n)).ok_or("levels= must be 1-8")?;
         } else if let Some(v) = tok.strip_prefix("floor=") {
             cfg.floor = v.parse().ok().filter(|n| *n >= 1).ok_or("floor= must be >= 1 (ms)")?;
+        } else if let Some(v) = tok.strip_prefix("hscale=") {
+            cfg.hscale = v != "0";
+        } else if let Some(v) = tok.strip_prefix("iotop=") {
+            cfg.iotop = v != "0";
         } else if let Some(v) = tok.strip_prefix("lag=") {
             cfg.lag = v != "0";
         } else if let Some(v) = tok.strip_prefix("credit=") {
@@ -306,6 +316,7 @@ pub fn run(cfg: &Config) {
     scheduler::set_fair_slice_lag(cfg.lag);
     scheduler::set_mlfq_levels(cfg.levels);
     scheduler::set_fair_floor_ms(cfg.floor);
+    scheduler::set_hint_shape(cfg.hscale, cfg.iotop);
     scheduler::set_quantum_ms(cfg.quantum);
     without_interrupts(|| RESULTS.lock().clear());
     QUIET.store(true, Ordering::SeqCst);
@@ -368,6 +379,12 @@ pub fn run(cfg: &Config) {
     // Non-default aging / boost periods are part of the configuration's identity.
     if cfg.policy == Policy::Hinted && cfg.aging != scheduler::DEFAULT_AGING_MS {
         label = alloc::format!("{}-aging{}", label, cfg.aging);
+    }
+    if cfg.policy == Policy::Hinted && !cfg.hscale {
+        label = alloc::format!("{}-flatq", label);
+    }
+    if cfg.policy == Policy::Hinted && cfg.iotop {
+        label = alloc::format!("{}-iotop", label);
     }
     if cfg.policy.is_fair() {
         if cfg.gran != scheduler::DEFAULT_FAIR_GRAN_MS {

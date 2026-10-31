@@ -602,6 +602,42 @@ by `constants_sweep.py`, report `report_release/constants_sweep.md`.
   The practical point is the same as F13: the MLFQ baseline's numbers hinge on
   constants I chose.
 
+### The hint scheduler's own shape (F22)
+
+The last two fixed choices in `hint` were made the same way the MLFQ boost
+was: by me, untested. One is slice scaling (Q << level, so a CPU-hinted thread
+gets 40 ms slices). The other is the mapping that puts io-hinted threads one
+level below interactive ones. `plans/hint_shape.txt`, 55 runs, 5 seeds,
+predictions committed first. Default lines rerun as a regression check matched
+`main_*` within 0.1 ms.
+
+| config | cpu4 switches | `all` interactive p95 | `all` io p95 | `mixed` io p95 | scale10 interactive p95 |
+|---|---|---|---|---|---|
+| hint (default) | 85 | 2 us | 0.69 ms | 1.90 ms | 3.60 ms |
+| flat slices (`hscale=0`) | 267 | 2 us | 0.69 ms | 1.90 ms | **0.60 ms** |
+| io on top level (`iotop=1`) | - | **818 us** | **0.002 ms** | 2.71 ms | - |
+
+* **H1 held:** without slice scaling, `hint`'s switch count on `cpu4` is round
+  robin's (267 vs 268). *All* of `hint`'s switch advantage in F7 comes from the
+  long slices it gives CPU-hinted threads, not from priority.
+* **H2 held:** flat slices leave interactive latency at 2 us and makespan
+  within 0.1%.
+* **H3 failed:** moving io to the top level made the io process in `all`
+  near-instant (0.69 ms to 2 us), but in `mixed` (two io processes, no
+  interactive) it got *worse* (1.9 to 2.7 ms). I don't have a tested explanation.
+* **H4 held:** the interactive process now shares its level with ~4.8 ms io
+  bursts, and its p95 rose from 2 us to 818 us (still well under rr's 9.8 ms).
+  The mapping is a straight trade between the two classes.
+* **Unpredicted:** flat slices cut `hint`'s worst case at ten competitors from
+  3.6 ms to 0.60 ms. That fits F11's mechanism: aged CPU threads tie with the
+  interactive process at the top level, and with flat slices the one that runs
+  first holds the CPU for 10 ms instead of 40.
+
+Together with F21, this sharpens F7. Every scheduler's switch count here is a
+direct function of its slice length (MLFQ depth, fair's floor, hint's scaling).
+What a hint contributes is *which* threads get long slices, which is exactly
+the part `hfair` keeps.
+
 ### What this changes about the research question
 
 The question was "can compiler-derived information help the scheduler?" The
@@ -744,7 +780,7 @@ Devlog 035 has the details. The harness itself had to be debugged:
 - [x] **Random, unpicked workloads** with pre-registered predictions (F15).
 - [x] **Separate tie-queuing from aging** in hint's random-mix latency (F16: it's aging, plus the tick floor).
 - [x] **MLFQ levels and fair's slice floor** (F21).
-- [ ] **Remaining fixed choices**: the hint-to-level mapping and `hint`'s quantum scaling.
+- [x] **Hint-to-level mapping and `hint`'s slice scaling** (F22).
 - [x] **Report starvation properly** (F20): worst wake-up and a starvation audit in the main report; F13 qualified.
 - [ ] **Literature review**: reading the papers below and writing down, in your
   own words, what each one did and how this study differs. Needs to be done

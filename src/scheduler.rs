@@ -152,10 +152,12 @@ impl Hint {
             _ => return None,
         })
     }
-    /// Priority level a hint maps to (0 = highest).
+    /// Priority level a hint maps to (0 = highest). `iotop=1` in `bench` puts
+    /// io-hinted threads on the interactive level.
     fn level(self) -> u8 {
         match self {
             Hint::Interactive => 0,
+            Hint::Io if HINT_IO_TOP.load(Ordering::Relaxed) => 0,
             Hint::Io | Hint::None => 1,
             Hint::Cpu => 2,
         }
@@ -517,10 +519,20 @@ pub fn set_hint(id: usize, hint: Hint) {
     });
 }
 
+/// `hint`: slices grow with level (Q << level) unless `hscale=0`.
+static HINT_SCALE: AtomicBool = AtomicBool::new(true);
+/// `hint`: map io-hinted threads to the top level (`iotop=1`).
+static HINT_IO_TOP: AtomicBool = AtomicBool::new(false);
+pub fn set_hint_shape(scale: bool, io_top: bool) {
+    HINT_SCALE.store(scale, Ordering::SeqCst);
+    HINT_IO_TOP.store(io_top, Ordering::SeqCst);
+}
+
 fn quantum_for(pol: Policy, level: u8) -> u64 {
     let q = quantum_ms();
     match pol {
         Policy::RoundRobin => q,
+        Policy::Hinted if !HINT_SCALE.load(Ordering::Relaxed) => q,
         _ => q << level,
     }
 }
