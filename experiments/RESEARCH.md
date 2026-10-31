@@ -106,7 +106,7 @@ per run), and Jain's fairness index over the CPU-bound processes.
 
 ## Results
 
-**Primary dataset: the optimized (release) kernel.** 1,155 runs in 147
+**Primary dataset: the optimized (release) kernel.** 1,550 runs in 215
 configurations, 10 seeds for the main matrix and 5 for sweeps (plus 1,440 runs
 on 30 random workloads, F15), zero plausibility
 warnings. Tables with 95% CIs are in `report_release/report.md`, graphs next to it.
@@ -238,7 +238,7 @@ seem to.
 
 **F13 - MLFQ's boost *hurts* interactive latency; without it MLFQ matches the
 hint scheduler for interactive work and wrecks I/O-style work (prediction P3:
-wrong).** I predicted shorter boost periods would improve interactive latency
+wrong; qualified by F20: only after an ~88 ms start-up wait).** I predicted shorter boost periods would improve interactive latency
 monotonically. The opposite happened. In `all`, interactive p95 latency by boost
 period: 25 ms -> 9.8 ms; 50 -> 10.4; 100 -> 14.2; 200 (default) -> 8.4;
 **1000 ms or off -> 1 us**. At ten competitors: 85 ms with a boost every 25-100
@@ -521,6 +521,60 @@ asymmetry follows from the design but wasn't measured here. So `safe` is a
 defensible choice when protecting neighbours matters more than accuracy. Under
 `hfair` neither direction can hurt neighbours, which is the F9 argument again.
 
+### Who pays for a wrong hint? (F19)
+
+F18 argued that a too-light hint hurts *neighbours* and a too-heavy one hurts
+*the mislabelled program itself*. `gen_asymmetry.py` tested that in the kernel.
+It took five corpus programs whose counted hint is too light (measured
+CPU-heavy, guessed interactive) and five whose safe hint is too heavy
+(measured interactive, guessed cpu). Each ran with each analysis's hint next
+to `p_int` (a real interactive program) and `p_cpu` (a hog), under `hint` and
+`hfair`, 3 seeds: 120 runs. The predictions were committed before running
+(d3c2836). Report: `report_release/asymmetry.md`.
+
+* **Y2 held, starkly. A too-heavy hint costs only the program itself.** All
+  five programs' own p95 went from 1-177 us (correct hint) to **100 ms**
+  (`hint` waits until aging rescues it, and the aging threshold is 100 ms),
+  while the neighbour stayed at 1 us in every case.
+* **Y1 failed. A too-light hint hurts neighbours less often than I predicted.**
+  `p_int`'s p95 exceeded 1 ms in 2 of 5 cases (3.1 ms, 1.9 ms), 178 us in a
+  third, and ~1-15 us in two. The harm scales with the mislabelled program's
+  burst length. Short bursts at top priority barely delay anyone.
+* **Y3 failed, for an instructive reason.** Under `hfair` the neighbour's p95
+  was above 100 us in 4 of 20 cells. Those cells are two programs, *with both
+  hints*: 537 us for both hints of h074, 1.2-1.9 ms for h126. A result that doesn't
+  depend on the hint can't be the hint's fault. These programs wake often with
+  ms-long bursts, so `p_int` sometimes wakes behind one: the F16 collision floor,
+  which applies to any co-waking program and not only to interactive siblings.
+  I should have predicted it from F16.
+
+**Net:** under `hint`, the direction of a classifier's error decides who pays,
+with a too-heavy error confined to the program that carries it. Under `hfair`,
+neither direction moved the neighbour's latency in 8 of 10 programs, and the other
+two differ by less than the collision floor.
+
+### Starvation audit: re-reading F1-F14 with worst cases (F20)
+
+p95 can't see a process that is starved once, and wake-up latency can't see
+one that waits before its first dispatch (F12 found that the hard way).
+`analyze.py` now reports the worst wake-up per class and lists every
+configuration in which an interactive process waited more than 50 ms at least
+once, before first dispatch or on any single wake-up (`report_release/report.md`,
+"Starvation audit"). 31 of 215 configurations qualify.
+
+* **The headline comparisons survive.** No configuration of `fair`, `hfair`, or
+  `hint` with correct hints at the default quantum is on the list.
+* **F13 needs a qualifier.** MLFQ with the boost off has p95 2 us at
+  scale10, but its interactive process's *first* dispatch waited 88 ms, behind
+  ten CPU-bound processes taking their top-level slices. Every MLFQ variant pays
+  that start-up wait (85-90 ms), so the boost comparison stands, but "MLFQ
+  without the boost matches fair" is true only after start-up.
+* **hfair at q = 50:** p95 3 us, but one run's interactive process waited 52.6 ms
+  for its first dispatch. That's a start-up cost of long base slices, not visible
+  in any earlier table.
+* The worst cases are the known ones: wrong hints under `hint` (106-220 ms, and
+  1.29 s with aging off), long quanta, and many competitors under rr/mlfq.
+
 ### What this changes about the research question
 
 The question was "can compiler-derived information help the scheduler?" The
@@ -555,7 +609,10 @@ workloads are synthetic.
 cargo bootimage --release
 experiments/run_all.sh target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin \
                        experiments/results/release 6
-python experiments/analyze.py experiments/results/release/*/ --out experiments/report_release
+# main report: the 18 hand-written plans (the random-mix, collision, corpus and
+# asymmetry runs have their own scorers: mix_summary.py, collisions.py,
+# hint_accuracy.py, asymmetry.py)
+python experiments/analyze.py $(for p in main_cpu4 main_mixed main_interactive main_all scale quantum     plainlang fair_main fair_sweeps fair_plainlang hfair_main hfair_sweeps hfair_mult hfair_plainlang     plainlang_v2 aging_boost fair_knobs fair_lag; do echo experiments/results/release/$p; done)     --out experiments/report_release
 
 # The classifier-accuracy corpus (F17) needs its own program files:
 python experiments/gen_hint_corpus.py          # needs ../plainlang
@@ -645,8 +702,7 @@ Devlog 035 has the details. The harness itself had to be debugged:
   behaviour (F17). Still open: real user programs, not generated ones.
 - [x] **A safety-biased classifier** (F18): trades errors from one direction to
   the other, 76% -> 59%. Not a fix.
-- [ ] **Measure the light/heavy cost asymmetry** in the kernel (corpus programs
-  under hint with each analysis's hints, next to real interactive processes).
+- [x] **Measure the light/heavy cost asymmetry** in the kernel (F19).
 - [x] **A fair-queuing baseline** (`fair`, CFS-style). It changed the main finding (F8-F10).
 - [x] **A policy that combines hints with fair queuing** (`hfair`; F9).
 - [x] **Sweeps of boost period and aging threshold** (F11-F13).
@@ -654,7 +710,7 @@ Devlog 035 has the details. The harness itself had to be debugged:
 - [x] **Random, unpicked workloads** with pre-registered predictions (F15).
 - [x] **Separate tie-queuing from aging** in hint's random-mix latency (F16: it's aging, plus the tick floor).
 - [ ] **Sweep the remaining constants** (MLFQ levels, hint-to-level mapping, `hint`'s quantum scaling, `fair`'s 1 ms slice floor).
-- [ ] **Report starvation properly**: response time and max latency alongside p95 for every class, in the main tables, and re-read F1-F10 with that in mind.
+- [x] **Report starvation properly** (F20): worst wake-up and a starvation audit in the main report; F13 qualified.
 - [ ] **Literature review**: reading the papers below and writing down, in your
   own words, what each one did and how this study differs. Needs to be done
   before claiming anything is novel.

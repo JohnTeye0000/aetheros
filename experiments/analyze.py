@@ -131,6 +131,8 @@ def per_run_metrics(results, summaries, lat):
             if samples:
                 for q in (50, 95, 99):
                     m[f"{cls}_lat_p{q}_ms"] = pct(samples, q) / 1000
+                m[f"{cls}_lat_max_ms"] = samples[-1] / 1000
+            m[f"{cls}_response_max_ms"] = max(int(p["response_us"]) for p in members) / 1000
         cpus = [int(p["cpu_us"]) / max(1, int(p["turnaround_us"]))
                 for p in procs if CLASS_OF.get(p["prog"]) == "cpu"]
         if len(cpus) >= 2:
@@ -187,6 +189,32 @@ def plausibility(results, summaries):
     return warn
 
 
+STARVED_MS = 50
+
+
+def starvation_audit(data):
+    """Every configuration where an interactive process waited longer than
+    STARVED_MS at least once (worst first response, or worst single wake-up),
+    in any run. p95 hides exactly these, so they are listed separately."""
+    rows = []
+    for c, runs in data.items():
+        resp = max((r.get("interactive_response_max_ms", 0) for r in runs), default=0)
+        lat = max((r.get("interactive_lat_max_ms", 0) for r in runs), default=0)
+        p95 = [r["interactive_lat_p95_ms"] for r in runs if "interactive_lat_p95_ms" in r]
+        if max(resp, lat) > STARVED_MS:
+            rows.append((max(resp, lat), c, resp, lat, sum(p95) / len(p95) if p95 else None))
+    rows.sort(key=lambda x: -x[0])
+    lines = ["## Starvation audit", "",
+             f"Configurations in which an interactive process waited more than {STARVED_MS} ms at least once, "
+             "either before its first dispatch (response) or on a single wake-up, in any run. "
+             f"{len(rows)} of {len(data)} configurations. The last column shows what p95 said about the same runs.", "",
+             "| workload | policy | hints | q | worst response | worst wake-up | mean p95 |", "|---|---|---|---|---|---|---|"]
+    for _, c, resp, lat, p95 in rows:
+        lines.append(f"| {c[0]} | {c[1]} | {c[2]} | {c[3]} | {resp:.1f} | {lat:.1f} | "
+                     + ("-" if p95 is None else f"{p95:.3f}") + " |")
+    return lines + [""]
+
+
 def write_report(data, out, warnings=()):
     lines = ["# AetherOS scheduling experiments — results", "",
              "Values are mean ± 95% CI across runs (one run per seed). Times in ms.",
@@ -195,6 +223,7 @@ def write_report(data, out, warnings=()):
         ("n", None),
         ("interactive p95 lat", "interactive_lat_p95_ms"),
         ("interactive p99 lat", "interactive_lat_p99_ms"),
+        ("interactive max lat", "interactive_lat_max_ms"),
         # Wake-up latency can't see a thread that is starved BEFORE its first
         # dispatch (found 2026-10-18: wrong hints + aging off gave a 1.3 s
         # response time and a 813 us p95). So report these two as well.
@@ -227,6 +256,7 @@ def write_report(data, out, warnings=()):
                     cells.append(fmt(m, ci, 3 if key == "jain_cpu" else 2))
             lines.append(f"| {c[1]} | {c[2]} | {c[3]} | " + " | ".join(cells) + " |")
         lines.append("")
+    lines += starvation_audit(data)
     lines += ["## Plausibility checks", ""]
     if warnings:
         lines += [f"{len(warnings)} warning(s):", ""] + [f"- {w}" for w in warnings[:200]]
