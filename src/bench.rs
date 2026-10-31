@@ -130,6 +130,10 @@ pub struct Config {
     pub credit: u64,
     /// `fair`/`hfair`: the slice-lag preemption rule (default on; `lag=0` turns it off).
     pub lag: bool,
+    /// `mlfq`/`hmlfq`: number of priority levels.
+    pub levels: u8,
+    /// `fair`/`hfair`: shortest slice (ms).
+    pub floor: u64,
 }
 
 pub const WORKLOADS: &str = "cpu4  mixed  interactive  all  scale<N>  mix:C,W,I  mix2:C,W,I  fpu  files:a.axe+b.axe+...";
@@ -230,6 +234,8 @@ pub fn parse(args: &str) -> Result<Config, &'static str> {
         gran: scheduler::DEFAULT_FAIR_GRAN_MS,
         credit: scheduler::DEFAULT_FAIR_CREDIT_PCT,
         lag: scheduler::DEFAULT_FAIR_SLICE_LAG,
+        levels: scheduler::DEFAULT_MLFQ_LEVELS,
+        floor: scheduler::DEFAULT_FAIR_FLOOR_MS,
     };
     for tok in it {
         // `hfair8` = hfair with an 8x slice multiplier; plain `hfair` = default.
@@ -244,6 +250,10 @@ pub fn parse(args: &str) -> Result<Config, &'static str> {
             cfg.aging = v.parse().map_err(|_| "bad aging=")?;
         } else if let Some(v) = tok.strip_prefix("gran=") {
             cfg.gran = v.parse().map_err(|_| "bad gran=")?;
+        } else if let Some(v) = tok.strip_prefix("levels=") {
+            cfg.levels = v.parse().ok().filter(|n| (1..=8).contains(n)).ok_or("levels= must be 1-8")?;
+        } else if let Some(v) = tok.strip_prefix("floor=") {
+            cfg.floor = v.parse().ok().filter(|n| *n >= 1).ok_or("floor= must be >= 1 (ms)")?;
         } else if let Some(v) = tok.strip_prefix("lag=") {
             cfg.lag = v != "0";
         } else if let Some(v) = tok.strip_prefix("credit=") {
@@ -294,6 +304,8 @@ pub fn run(cfg: &Config) {
     scheduler::set_fair_gran_ms(cfg.gran);
     scheduler::set_fair_credit_pct(cfg.credit);
     scheduler::set_fair_slice_lag(cfg.lag);
+    scheduler::set_mlfq_levels(cfg.levels);
+    scheduler::set_fair_floor_ms(cfg.floor);
     scheduler::set_quantum_ms(cfg.quantum);
     without_interrupts(|| RESULTS.lock().clear());
     QUIET.store(true, Ordering::SeqCst);
@@ -367,6 +379,12 @@ pub fn run(cfg: &Config) {
         if cfg.credit != scheduler::DEFAULT_FAIR_CREDIT_PCT {
             label = alloc::format!("{}-credit{}", label, cfg.credit);
         }
+        if cfg.floor != scheduler::DEFAULT_FAIR_FLOOR_MS {
+            label = alloc::format!("{}-floor{}", label, cfg.floor);
+        }
+    }
+    if matches!(cfg.policy, Policy::Mlfq | Policy::HintedMlfq) && cfg.levels != scheduler::DEFAULT_MLFQ_LEVELS {
+        label = alloc::format!("{}-levels{}", label, cfg.levels);
     }
     if matches!(cfg.policy, Policy::Mlfq | Policy::HintedMlfq) && cfg.boost != scheduler::DEFAULT_BOOST_MS {
         label = alloc::format!("{}-boost{}", label, cfg.boost);

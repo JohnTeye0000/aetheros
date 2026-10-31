@@ -73,8 +73,16 @@ const STACK_SIZE: usize = 32 * 1024;
 /// Wake-up latency samples kept per thread (oldest kept, extras dropped).
 const MAX_LAT_SAMPLES: usize = 4096;
 
-/// Number of priority levels for the multi-level policies.
-const LEVELS: u8 = 3;
+/// Number of priority levels for MLFQ (`levels=` in `bench`). The hint
+/// policies always use 3 (interactive, io, cpu).
+pub const DEFAULT_MLFQ_LEVELS: u8 = 3;
+static MLFQ_LEVELS: AtomicU8 = AtomicU8::new(DEFAULT_MLFQ_LEVELS);
+pub fn set_mlfq_levels(n: u8) {
+    MLFQ_LEVELS.store(n.clamp(1, 8), Ordering::SeqCst);
+}
+fn mlfq_levels() -> u8 {
+    MLFQ_LEVELS.load(Ordering::Relaxed)
+}
 
 /// MLFQ: every BOOST_MS, all threads return to the top level (so CPU-bound
 /// threads can't starve forever, and a thread whose behaviour changed gets
@@ -241,9 +249,14 @@ pub fn ctx_switches() -> u64 {
 pub fn sched_cycles() -> u64 {
     SCHED_CYCLES.load(Ordering::Relaxed)
 }
+/// Called at the start of every benchmark run. Also restarts MLFQ's boost
+/// clock: without that, the boost phase at the start of a run depended on when
+/// the PREVIOUS run ended, so identical runs (same seed) disagreed by up to
+/// 30 ms in io-style p95 depending on their order in the plan (devlog 045).
 pub fn reset_counters() {
     CTX_SWITCHES.store(0, Ordering::SeqCst);
     SCHED_CYCLES.store(0, Ordering::SeqCst);
+    LAST_BOOST.store(crate::interrupts::ticks(), Ordering::SeqCst);
 }
 
 /// The 512-byte area `fxsave`/`fxrstor` use for the x87/MMX/SSE registers.
@@ -499,7 +512,7 @@ pub fn set_hint(id: usize, hint: Hint) {
         let mut s = SCHED.lock();
         if let Some(t) = s.threads.iter_mut().find(|t| t.id == id) {
             t.hint = hint;
-            t.level = if policy() == Policy::HintedMlfq { hint.level() } else { 0 };
+            t.level = if policy() == Policy::HintedMlfq { hint.level().min(mlfq_levels() - 1) } else { 0 };
         }
     });
 }
@@ -545,6 +558,13 @@ pub fn set_fair_slice_lag(on: bool) {
     FAIR_SLICE_LAG.store(on, Ordering::SeqCst);
 }
 static FAIR_CREDIT_PCT: AtomicU64 = AtomicU64::new(DEFAULT_FAIR_CREDIT_PCT);
+/// The shortest slice `fair` hands out, however many threads share the
+/// target latency (Linux's minimum granularity; here whole 1 ms ticks).
+pub const DEFAULT_FAIR_FLOOR_MS: u64 = 1;
+static FAIR_FLOOR_MS: AtomicU64 = AtomicU64::new(DEFAULT_FAIR_FLOOR_MS);
+pub fn set_fair_floor_ms(ms: u64) {
+    FAIR_FLOOR_MS.store(ms.max(1), Ordering::SeqCst);
+}
 
 pub fn set_fair_gran_ms(ms: u64) {
     FAIR_GRAN_MS.store(ms, Ordering::SeqCst);
@@ -593,7 +613,7 @@ pub fn set_hfair_mult(m: u64) {
 
 /// The fair slice in ticks: target latency shared among runnable threads.
 fn fair_slice(s: &Scheduler) -> u64 {
-    (quantum_ms() / nr_runnable(s).max(1)).max(1)
+    (quantum_ms() / nr_runnable(s).max(1)).max(FAIR_FLOOR_MS.load(Ordering::Relaxed))
 }
 
 /// The slice for one thread. Plain `fair`: the same for everyone. `hfair`: a
@@ -807,7 +827,7 @@ pub fn on_tick() {
                 {
                     // Used its whole allotment at this level: CPU-bound
                     // behaviour, so it sinks one level.
-                    if c.level + 1 < LEVELS {
+                    if c.level + 1 < mlfq_levels() {
                         c.level += 1;
                     }
                     c.used_at_level = 0;

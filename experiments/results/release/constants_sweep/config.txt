@@ -1,0 +1,43 @@
+timing=icount shift=3,sleep=off
+cpu=default
+bin=target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin
+
+# The last fixed constants: MLFQ's number of levels and fair's minimum slice.
+# 5 seeds each. PREDICTIONS, WRITTEN BEFORE RUNNING:
+#   K1. levels=1 turns mlfq into round robin: interactive p95 in `all` and
+#       scale10 within 10% of rr's (the boost is a no-op with one level).
+#   K2. More levels give demoted CPU-bound threads longer slices (Q << level), so
+#       context switches in cpu4 fall monotonically from levels=1 to levels=5.
+#   K3. Interactive p95 in `all` under mlfq is within +-20% across levels 2-5:
+#       after each boost the CPU-bound threads start at the top again, and that
+#       (F13), not the depth of the queue, sets interactive latency.
+#   K4. fair's floor: in scale10 (11 threads share a 10 ms target, so the floor
+#       binds) context switches fall roughly in proportion: floor=2 gives
+#       0.5x floor=1's switches, floor=5 gives 0.2x (each within +-25%).
+#   K5. Interactive p95 under fair stays <= 100 us at every floor in `all` and
+#       scale10: wake-ups preempt on vruntime, not at slice end.
+#   K6. Makespan within 1% across floors, and within 1% across levels.
+repeat 5 bench all mlfq levels=1
+repeat 5 bench all mlfq levels=2
+repeat 5 bench all mlfq levels=3
+repeat 5 bench all mlfq levels=4
+repeat 5 bench all mlfq levels=5
+repeat 5 bench scale10 mlfq levels=1
+repeat 5 bench scale10 mlfq levels=3
+repeat 5 bench scale10 mlfq levels=5
+repeat 5 bench cpu4 mlfq levels=1
+repeat 5 bench cpu4 mlfq levels=2
+repeat 5 bench cpu4 mlfq levels=3
+repeat 5 bench cpu4 mlfq levels=4
+repeat 5 bench cpu4 mlfq levels=5
+repeat 5 bench all rr
+repeat 5 bench scale10 rr
+repeat 5 bench scale10 fair
+repeat 5 bench scale10 fair floor=2
+repeat 5 bench scale10 fair floor=3
+repeat 5 bench scale10 fair floor=5
+repeat 5 bench all fair
+repeat 5 bench all fair floor=2
+repeat 5 bench all fair floor=3
+repeat 5 bench all fair floor=5
+poweroff

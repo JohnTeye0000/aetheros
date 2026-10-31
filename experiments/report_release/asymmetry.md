@@ -20,7 +20,7 @@ p95 wake-up latency in microseconds, mean over 3 seeds. 'neighbour' = p_int (a r
 | LIGHT | h085 | s | cpu | hint | 1 | 100001 |
 | LIGHT | h085 | c | interactive | hfair | 2 | 2 |
 | LIGHT | h085 | s | cpu | hfair | 2 | 2 |
-| LIGHT | h117 | c | interactive | hint | 1 | 178 |
+| LIGHT | h117 | c | interactive | hint | 1 | 177 |
 | LIGHT | h117 | s | cpu | hint | 1 | 33510 |
 | LIGHT | h117 | c | interactive | hfair | 2 | 511 |
 | LIGHT | h117 | s | cpu | hfair | 2 | 511 |
@@ -31,11 +31,11 @@ p95 wake-up latency in microseconds, mean over 3 seeds. 'neighbour' = p_int (a r
 | HEAVY | h025 | c | interactive | hint | 1 | 177 |
 | HEAVY | h025 | s | cpu | hint | 1 | 100001 |
 | HEAVY | h025 | c | interactive | hfair | 2 | 511 |
-| HEAVY | h025 | s | cpu | hfair | 2 | 511 |
+| HEAVY | h025 | s | cpu | hfair | 2 | 266 |
 | HEAVY | h050 | c | interactive | hint | 29 | 1 |
 | HEAVY | h050 | s | cpu | hint | 1 | 100001 |
 | HEAVY | h050 | c | interactive | hfair | 2 | 2 |
-| HEAVY | h050 | s | cpu | hfair | 30 | 12 |
+| HEAVY | h050 | s | cpu | hfair | 2 | 2 |
 | HEAVY | h073 | c | interactive | hint | 1 | 1 |
 | HEAVY | h073 | s | cpu | hint | 1 | 100001 |
 | HEAVY | h073 | c | interactive | hfair | 2 | 2 |

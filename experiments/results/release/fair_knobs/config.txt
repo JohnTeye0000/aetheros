@@ -1,6 +1,6 @@
 timing=icount shift=3,sleep=off
 cpu=default
-bin=../target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin
+bin=target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin
 
 # fair's own constants: wake-up granularity (gran, ms) and sleeper credit (credit,
 # percent of the base quantum Q=10 ms). 5 seeds. WRITTEN BEFORE RUNNING.

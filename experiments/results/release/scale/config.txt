@@ -1,6 +1,6 @@
 timing=icount shift=3,sleep=off
 cpu=default
-bin=../target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin
+bin=target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin
 
 # scaling: N CPU-bound processes + 1 interactive, 5 seeds each
 repeat 5 bench scale1 rr

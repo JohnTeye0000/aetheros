@@ -1,6 +1,6 @@
 timing=icount shift=3,sleep=off
 cpu=default
-bin=../target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin
+bin=target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin
 
 # hfair slice multiplier sweep at q=10 (4 is the default, covered by hfair_main), 5 seeds.
 # (Run before the bench-defaults fix this silently ran at q=50; see devlog 039.)

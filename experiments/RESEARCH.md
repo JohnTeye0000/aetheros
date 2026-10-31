@@ -130,7 +130,7 @@ as MLFQ's starting level; `fair` a CFS-style baseline that uses no hints;
 
 **F1 - Correct hints cut interactive latency by three to four orders of
 magnitude relative to round robin and MLFQ.** Workload `all`: 2 us (`hint`)
-against 9.8 ms (`rr`) and 8.0 ms (`mlfq`). A woken interactive process has
+against 9.8 ms (`rr`) and 6.8 ms (`mlfq`). A woken interactive process has
 strictly higher priority, so it preempts within one timer tick. The advantage
 shrinks as CPU-bound competitors are added: 203 us with six, and 3.6 ms (+/-3.7
 across seeds) with ten, against 85 ms (`rr`) and 45 ms (`mlfq`). The cause is
@@ -139,11 +139,13 @@ the aging rule (F11): with aging off, `hint` is 4 us at ten competitors.
 **F2 - MLFQ with the textbook periodic boost recovers almost none of that;
 without the boost it recovers all of it for strictly interactive work, at a
 price (revised - see F13).** With my default 200 ms boost, interactive latency
-under `mlfq` is 8.0 ms against 9.8 ms for `rr` (`all`) and 15.7 ms against
+under `mlfq` is 6.8 ms against 9.8 ms for `rr` (`all`) and 15.0 ms against
 15.0 ms (`interactive`), and the I/O-style process is slower than under round
-robin (21 ms vs 17 ms in `all`, 29 ms vs 21 ms in `mixed`). `hmlfq` behaves like
-`mlfq` whatever the hints say (`interactive`: 15.8 / 16.3 / 16.9 ms with
-correct / no / wrong hints): MLFQ's demotion erases the hint. **The first version
+robin (35 ms vs 17 ms in `all`, 30 ms vs 21 ms in `mixed`). `hmlfq` behaves like
+`mlfq` whatever the hints say (`interactive`: 16.5 / 15.0 / 16.0 ms with
+correct / no / wrong hints): MLFQ's demotion erases the hint. (Numbers from the
+rerun after the boost-clock fix; before it, MLFQ-family values depended on
+plan order. See "Measurement problems".) **The first version
 of this document stated F2 without the qualification. The 200 ms boost was my
 choice, and the conclusion depends on it** (F13).
 
@@ -240,13 +242,13 @@ seem to.
 hint scheduler for interactive work and wrecks I/O-style work (prediction P3:
 wrong; qualified by F20: only after an ~88 ms start-up wait).** I predicted shorter boost periods would improve interactive latency
 monotonically. The opposite happened. In `all`, interactive p95 latency by boost
-period: 25 ms -> 9.8 ms; 50 -> 10.4; 100 -> 14.2; 200 (default) -> 8.4;
+period: 25, 50 and 100 ms -> 9.8 ms; 200 (default) -> 6.8;
 **1000 ms or off -> 1 us**. At ten competitors: 85 ms with a boost every 25-100
 ms, 45 ms at the default, **2 us** at 1000 ms or off. The boost periodically
 returns every CPU-bound thread to the interactive process's level, which is
 exactly what MLFQ's demotion was supposed to prevent. The price is paid by the
 I/O-style process: with the boost off its p95 latency is **76 ms** (max 116 ms)
-against 6-23 ms with a boost, 1.5 ms for `fair` and 0.6 ms for `hint`; it is
+against 6-35 ms with a boost, 1.5 ms for `fair` and 0.6 ms for `hint`; it is
 sunk to the bottom level and stays there. It also risks starving CPU-bound
 work, though not at these workload sizes (makespan +2% with the boost off).
 
@@ -575,6 +577,31 @@ once, before first dispatch or on any single wake-up (`report_release/report.md`
 * The worst cases are the known ones: wrong hints under `hint` (106-220 ms, and
   1.29 s with aging off), long quanta, and many competitors under rr/mlfq.
 
+### The last constants: MLFQ depth and fair's slice floor (F21)
+
+Pre-registered in `plans/constants_sweep.txt` (115 runs, final image), scored
+by `constants_sweep.py`, report `report_release/constants_sweep.md`.
+
+* **K1 held:** one-level MLFQ is round robin (9,818 vs 9,817 us in `all`).
+* **K4-K6 held:** fair's slice floor behaves exactly as designed. Switches in
+  `scale10` fall to 0.50x at a 2 ms floor and 0.21x at 5 ms (predicted 0.50 and
+  0.20). Interactive latency stays at 3-6 us at every floor, and makespan moves
+  under 1%. So `fair`'s switch count, the main thing hints improved on (F7), is
+  itself a tunable constant. A fair scheduler with a 5 ms floor needs no hints
+  to cut its switches by 5x. That narrows F7: hints buy switch reductions
+  *without* raising the floor, which matters only if a short floor is wanted for
+  other reasons.
+* **K2 failed:** switches in `cpu4` fall from 1 to 3 levels (268, 164, 140)
+  and then stop (140 at 4 and 5). With four threads sharing a 200 ms boost
+  period, none uses enough CPU between boosts to sink below level 3. The boost
+  caps the depth that matters.
+* **K3 failed:** depth does change interactive latency in `all`: 4.4 ms (2
+  levels), 6.8 (3), 18.8 (4 and 5). Deeper levels give the two CPU-bound threads
+  80-160 ms slices. My guess is that a woken interactive thread then waits out
+  part of such a slice after each boost, but that mechanism hasn't been tested.
+  The practical point is the same as F13: the MLFQ baseline's numbers hinge on
+  constants I chose.
+
 ### What this changes about the research question
 
 The question was "can compiler-derived information help the scheduler?" The
@@ -651,6 +678,13 @@ Devlog 035 has the details. The harness itself had to be debugged:
 * **benchmarking an unoptimized kernel** inflated every scheduling cost 10x and
   led to wrong cost conclusions (see Results). The release build is the primary
   dataset now;
+* **MLFQ's boost clock carried over between runs.** Nothing reset it when a
+  run started, so the boost phase depended on when the previous run ended. Identical
+  mlfq/hmlfq runs (same seed) disagreed by up to 29 ms in io-style p95,
+  depending on the order of lines in the plan. Found by a seed-for-seed regression
+  check (`compare_runs.py`) after adding new knobs. It's fixed (`reset_counters`),
+  the order effect is now at most one tick, and **every plan was rerun on the
+  fixed image** (devlog 045);
 * "stalls" that turned out to be the **host laptop entering Modern Standby**
   (matched to the second against the Windows event log). Completed runs are
   unaffected, because `-icount` guest time counts instructions. Interrupted
@@ -680,7 +714,7 @@ Devlog 035 has the details. The harness itself had to be debugged:
    MLFQ's boost and `fair`'s granularity and credit are swept now (F11-F14;
    `fair` turned out to be insensitive). Not swept: the 3 MLFQ levels, the
    hint-to-level mapping, `hint`'s quantum scaling, and `fair`'s slice
-   floor. Any of them could move conclusions the way the boost period did. Results depend on Q = 10 ms, 3 levels,
+   floor (both now swept, F21). Any of them could move conclusions the way the boost period did. Results depend on Q = 10 ms, 3 levels,
    200 ms boost, 100 ms aging. The quantum sweep varies Q; the others are fixed
    for now and should be swept before strong claims are made.
 5. **Small scale.** One CPU, at most 15 processes, seconds-long runs.
@@ -709,7 +743,8 @@ Devlog 035 has the details. The harness itself had to be debugged:
 - [x] **`fair`'s wake-up granularity and sleeper credit** (F14: insensitive).
 - [x] **Random, unpicked workloads** with pre-registered predictions (F15).
 - [x] **Separate tie-queuing from aging** in hint's random-mix latency (F16: it's aging, plus the tick floor).
-- [ ] **Sweep the remaining constants** (MLFQ levels, hint-to-level mapping, `hint`'s quantum scaling, `fair`'s 1 ms slice floor).
+- [x] **MLFQ levels and fair's slice floor** (F21).
+- [ ] **Remaining fixed choices**: the hint-to-level mapping and `hint`'s quantum scaling.
 - [x] **Report starvation properly** (F20): worst wake-up and a starvation audit in the main report; F13 qualified.
 - [ ] **Literature review**: reading the papers below and writing down, in your
   own words, what each one did and how this study differs. Needs to be done
