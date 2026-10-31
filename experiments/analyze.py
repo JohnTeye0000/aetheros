@@ -33,7 +33,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 POLICY_ORDER = ["rr", "fair", "mlfq", "hint", "hmlfq", "hfair2", "hfair", "hfair8", "hfair16"]
 HINT_ORDER = ["on", "none", "wrong"]
 # what each program REALLY is (ground truth by construction), whatever hint it carries
-CLASS_OF = {"wcpu": "cpu", "wio": "io", "wint": "interactive",
+CLASS_OF = {"wcpu": "cpu", "wio": "io", "wint": "interactive", "wint2": "interactive", "wint3": "interactive",
             "p_cpu.axe": "cpu", "p_io.axe": "io", "p_int.axe": "interactive",
             "p_phase.axe": "phase", "p_trick.axe": "io", "p_trick_c.axe": "io",
             "p_opaque.axe": "io"}

@@ -866,6 +866,47 @@ global_asm!(
         int  0x80
     user_wint_end:
 
+    // Interactive variants with DIFFERENT periods, so several of them don't wake in
+    // lockstep (identical 15 ms periods make them queue behind each other no
+    // matter what the scheduler does -- found with the random-mix study).
+    .global user_wint2_start
+    .global user_wint2_end
+    user_wint2_start:
+        mov  r12d, 30
+    uwn2_round:
+        mov  eax, 4                      // wait 13 ms for the next "event"
+        mov  edi, 13
+        int  0x80
+        mov  rcx, 30000                  // ...then handle it quickly
+    uwn2_loop:
+        dec  rcx
+        jnz  uwn2_loop
+        dec  r12d
+        jnz  uwn2_round
+        mov  eax, 0
+        xor  edi, edi
+        int  0x80
+    user_wint2_end:
+
+    .global user_wint3_start
+    .global user_wint3_end
+    user_wint3_start:
+        mov  r12d, 30
+    uwn3_round:
+        mov  eax, 4                      // wait 17 ms for the next "event"
+        mov  edi, 17
+        int  0x80
+        mov  rcx, 30000                  // ...then handle it quickly
+    uwn3_loop:
+        dec  rcx
+        jnz  uwn3_loop
+        dec  r12d
+        jnz  uwn3_round
+        mov  eax, 0
+        xor  edi, edi
+        int  0x80
+    user_wint3_end:
+
     // ---- SSE state test (Stage 36) ------------------------------------------
     .global user_fpu_start
     .global user_fpu_end
@@ -1030,6 +1071,8 @@ pub const PROGRAMS: &[(&str, &str)] = &[
     ("wcpu", "benchmark: pure computation, never blocks (hint=cpu)"),
     ("wio", "benchmark: short compute bursts + 4 ms simulated I/O waits (hint=io)"),
     ("wint", "benchmark: waits 15 ms for an 'event', handles it briefly (hint=interactive)"),
+    ("wint2", "benchmark: like wint but a 13 ms period (hint=interactive)"),
+    ("wint3", "benchmark: like wint but a 17 ms period (hint=interactive)"),
 ];
 
 /// The scheduling hint each built-in declares about itself. Only the
@@ -1039,7 +1082,7 @@ pub fn builtin_hint(name: &str) -> crate::scheduler::Hint {
     match name {
         "wcpu" => Hint::Cpu,
         "wio" => Hint::Io,
-        "wint" => Hint::Interactive,
+        "wint" | "wint2" | "wint3" => Hint::Interactive,
         _ => Hint::None,
     }
 }
@@ -1068,6 +1111,8 @@ pub fn builtin(name: &str) -> Option<&'static [u8]> {
         "wcpu" => blob!(user_wcpu_start, user_wcpu_end),
         "wio" => blob!(user_wio_start, user_wio_end),
         "wint" => blob!(user_wint_start, user_wint_end),
+        "wint2" => blob!(user_wint2_start, user_wint2_end),
+        "wint3" => blob!(user_wint3_start, user_wint3_end),
         "bsys" => blob!(user_bsys_start, user_bsys_end),
         _ => return None,
     })

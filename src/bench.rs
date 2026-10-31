@@ -132,7 +132,7 @@ pub struct Config {
     pub lag: bool,
 }
 
-pub const WORKLOADS: &str = "cpu4  mixed  interactive  all  scale<N>  fpu  files:a.axe+b.axe+...";
+pub const WORKLOADS: &str = "cpu4  mixed  interactive  all  scale<N>  mix:C,W,I  mix2:C,W,I  fpu  files:a.axe+b.axe+...";
 
 /// One process to launch: (name, machine code, the hint it declares).
 type Launch = (String, Vec<u8>, Hint);
@@ -176,6 +176,25 @@ fn programs(workload: &str) -> Option<Vec<&'static str>> {
         // correctness check, not a performance workload: 3 processes keeping
         // values in SSE registers while being switched (exit status = corruptions)
         "fpu" => alloc::vec!["fpu", "fpu", "fpu", "wcpu"],
+        // mix:C,W,I = C cpu-bound + W io-style + I interactive processes (total <= 14).
+        // Lets the study draw workloads it didn't tune against.
+        // mix2:C,W,I is the same but the I interactive processes have different
+        // periods (15, 13, 17 ms, cycling) so they don't wake in lockstep.
+        w if w.starts_with("mix:") || w.starts_with("mix2:") => {
+            let staggered = w.starts_with("mix2:");
+            let body = if staggered { &w["mix2:".len()..] } else { &w["mix:".len()..] };
+            let mut it = body.split(',').map(|x| x.parse::<usize>().ok());
+            let (c, i_o, n_i) = (it.next()??, it.next()??, it.next()??);
+            if it.next().is_some() || c + i_o + n_i == 0 || c + i_o + n_i > 14 {
+                return None;
+            }
+            let mut v = alloc::vec!["wcpu"; c];
+            v.extend(core::iter::repeat("wio").take(i_o));
+            for k in 0..n_i {
+                v.push(if staggered { ["wint", "wint2", "wint3"][k % 3] } else { "wint" });
+            }
+            v
+        }
         w => {
             let n: usize = w.strip_prefix("scale")?.parse().ok()?;
             if n == 0 || n > 14 {
@@ -352,10 +371,13 @@ pub fn run(cfg: &Config) {
     if matches!(cfg.policy, Policy::Mlfq | Policy::HintedMlfq) && cfg.boost != scheduler::DEFAULT_BOOST_MS {
         label = alloc::format!("{}-boost{}", label, cfg.boost);
     }
+    // Workload names may contain commas (mix:4,3,3), which would break the CSV
+    // lines; the host sees them with ';' instead (mix:4;3;3).
+    let workload_label = cfg.workload.replace(',', ";");
     let tag = alloc::format!(
         "{},{},{},{},{},{}",
         run_id,
-        cfg.workload,
+        workload_label,
         label,
         cfg.quantum,
         cfg.hints.name(),
@@ -363,7 +385,7 @@ pub fn run(cfg: &Config) {
     );
     println!(
         "bench #{} {} policy={} q={} hints={} seed={}",
-        run_id, cfg.workload, label, cfg.quantum, cfg.hints.name(), cfg.seed
+        run_id, workload_label, label, cfg.quantum, cfg.hints.name(), cfg.seed
     );
     println!("  pid prog  hint         turnaround_us  cpu_us   wait_us  lat_p95");
     for r in &results {

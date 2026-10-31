@@ -107,7 +107,8 @@ per run), and Jain's fairness index over the CPU-bound processes.
 ## Results
 
 **Primary dataset: the optimized (release) kernel.** 1,155 runs in 147
-configurations, 10 seeds for the main matrix and 5 for sweeps, zero plausibility
+configurations, 10 seeds for the main matrix and 5 for sweeps (plus 1,440 runs
+on 30 random workloads, F15), zero plausibility
 warnings. Tables with 95% CIs are in `report_release/report.md`, graphs next to it.
 Everything below is from that dataset unless it says otherwise.
 
@@ -332,6 +333,81 @@ interactive neighbour under `hint`:
 Still far better than round robin's 7.7 ms, and exactly 0.003 ms under `hfair`
 in all three cases.
 
+### Out of sample: 30 random workloads (F15)
+
+Every workload above was picked by me, and `hfair` was designed after looking
+at the data it was supposed to explain. So `gen_random_mix.py` draws 30
+workloads (1-8 CPU-bound, 0-3 io-style and 0-3 interactive processes) from a
+fixed seed and runs each under eight policy configurations, 3 seeds each: 720
+runs per batch. The predictions sit in the plan headers and were written
+before each batch ran. `mix_summary.py` scores them mechanically. Reports:
+`report_release/random_mix.md` (v1), `report_release/random_mix2.md` (v2).
+
+**v1 (`mix:`; every interactive process sleeps exactly 15 ms).**
+
+| prediction | result |
+|---|---|
+| M1 fair and hfair interactive p95 <= 50 us in every mix | **failed** 5/21 |
+| M2 hint <= hfair <= 1.05 x fair in context switches | held 30/30 |
+| M3a hfair with wrong hints <= 50 us in every mix | **failed** 5/21 |
+| M3b hint with wrong hints > 10 ms in a third of mixes | held 21/21 |
+| M4 makespan within 1% | **failed** 23/30 (worst 1.14%) |
+| M5 mlfq worst of the hint-free policies | **failed** 4/21 |
+
+M1 and M3a failed because of my workload, not the schedulers: with two or more
+interactive processes on identical 15 ms periods, they all woke in the same
+tick and queued behind each other. No single-CPU scheduler can avoid that. M5
+was ill-posed: rr and mlfq are both tens of ms behind fair, and which of the two
+is worse is noise. Single-interactive mixes did behave as predicted (fair,
+hfair and hint 3-6 us; rr and mlfq 39-75 ms).
+
+**v2 (`mix2:`; interactive periods staggered 13/15/17 ms; same 30 mixes;
+predictions rewritten after v1, before running).**
+
+| prediction | result |
+|---|---|
+| M1' fair and hfair p95 <= 100 us in >= 90% of mixes | **failed** 13/21 |
+| M2 hint <= hfair <= 1.05 x fair in switches | held 30/30 |
+| M3a' hfair with wrong hints <= 100 us in >= 90% | **failed** 17/21 |
+| M3b hint with wrong hints > 10 ms in a third | held 21/21 |
+| M4' makespan within 1.5% | held 30/30 (worst 1.14%) |
+| M5' rr's and mlfq's p95 worse than fair's | held 21/21 |
+| M6a hint (correct hints) <= 100 us in >= 90% of mixes with <= 5 CPU-bound | **failed** 6/11 |
+| M6b hint > 100 us in at least one mix with >= 7 CPU-bound | held (6/8) |
+
+Staggering didn't remove the collisions: every M1' failure is a mix with
+**three** interactive processes. The explanation, which I worked out *after*
+seeing the failures (so treat it as a hypothesis, not a result), is the
+1 ms timer tick. Wake-ups are quantized to ticks, and two processes whose
+wake-ups land in the same tick queue behind each other whatever the periods
+are. With per-wake collision probability about 1/15 + 1/17 and half of the
+colliding wake-ups being second in line, about 6% of wake-ups for three
+interactive processes should be delayed by one burst (~0.17-0.33 ms), and
+about 3% for two. Measured under `fair`: **0.0% (one interactive), 3.3% (two), 5.2%
+(three)** of wake-ups over 100 us. The p95 threshold sits right on that edge,
+so p95 flips for I = 3 and not for I = 2. A metric threshold placed at p95
+turned a 5% effect into a pass/fail cliff, which is a lesson about the metric
+as much as the scheduler.
+
+What the random workloads support:
+
+* **The structural claims replicate out of sample.** The switch ordering
+  hint <= hfair <= fair (M2) held in 60/60 mix-batches, wrong hints break
+  hint-as-priority in every mix with both CPU-bound and interactive processes
+  (M3b, 42/42, worst interactive response time 164 ms), makespan
+  stays within ~1.1%, and fair beats rr and mlfq everywhere (M5').
+* **hfair's wrong-hint robustness mostly replicates** (17/21; every failure is a
+  three-interactive mix at 0.18-0.19 ms, against 107-150 ms for hint).
+* **hint with *correct* hints is less robust than the hand-picked workloads
+  suggested.** Its p95 reaches 0.33-2.7 ms in 15 of 21 mixes. Most of these mixes
+  have two or three interactive processes that hint ranks equally, so some of the
+  latency comes from them queuing behind each other and some from aging (F11).
+  The two aren't separated yet.
+* **"Interactive latency of a few microseconds" holds for one interactive
+  process.** With several, every policy is bounded below by one interactive
+  process's burst, and the comparison has to be made on p90 or on the fraction
+  of delayed wake-ups, not on p95 against a fixed threshold.
+
 ### What this changes about the research question
 
 The question was "can compiler-derived information help the scheduler?" The
@@ -452,9 +528,10 @@ Devlog 035 has the details. The harness itself had to be debugged:
   behaviour.
 - [x] **A fair-queuing baseline** (`fair`, CFS-style). It changed the main finding (F8-F10).
 - [x] **A policy that combines hints with fair queuing** (`hfair`; F9).
-- [ ] **Sweeps of `fair`'s own parameters** (wake-up granularity, sleeper credit).
 - [x] **Sweeps of boost period and aging threshold** (F11-F13).
 - [x] **`fair`'s wake-up granularity and sleeper credit** (F14: insensitive).
+- [x] **Random, unpicked workloads** with pre-registered predictions (F15).
+- [ ] **Separate tie-queuing from aging** in hint's random-mix latency (F15).
 - [ ] **Sweep the remaining constants** (MLFQ levels, hint-to-level mapping, `hint`'s quantum scaling, `fair`'s 1 ms slice floor).
 - [ ] **Report starvation properly**: response time and max latency alongside p95 for every class, in the main tables, and re-read F1-F10 with that in mind.
 - [ ] **Literature review**: reading the papers below and writing down, in your
