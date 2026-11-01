@@ -1,0 +1,21 @@
+# Graded aging for `hint` (agestep=1): a waiting thread rises ONE level per
+# 100 ms aging period instead of jumping to the top. Three results (F11, F22's
+# scale10 surprise, the iotop anomaly) trace to aged CPU threads colliding with
+# interactive/io threads at the top level. 5 seeds.
+# PREDICTIONS, WRITTEN BEFORE RUNNING:
+#   G1. scale10: interactive p95 falls below the default's 3.6 ms. (Uncertain:
+#       CPU threads there wait ~300+ ms, i.e. 3 periods, so many still reach the
+#       top; I predict improvement, not elimination: still > 100 us.)
+#   G2. all, WRONG hints: the interactive victim (hinted cpu, level 2) needs two
+#       periods to reach the top, so its p95 rises to 150-260 ms (like aging=200),
+#       but its worst response time stays < 400 ms: still no starvation.
+#   G3. mixed + iotop=1: io p95 back to <= 2.0 ms (the anomaly disappears).
+#   G4. all, correct hints: interactive p95 still <= 10 us, makespan within 1%.
+repeat 5 bench scale10 hint
+repeat 5 bench scale10 hint agestep=1
+repeat 5 bench all hint hints=wrong
+repeat 5 bench all hint hints=wrong agestep=1
+repeat 5 bench mixed hint iotop=1
+repeat 5 bench mixed hint iotop=1 agestep=1
+repeat 5 bench all hint
+repeat 5 bench all hint agestep=1
