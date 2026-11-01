@@ -1,0 +1,19 @@
+timing=icount shift=3,sleep=off
+cpu=default
+bin=target/x86_64-unknown-none/release/bootimage-aetheros_kernel.bin
+
+# Why did iotop=1 make io latency WORSE in `mixed` (F22, H3 failed: 1.9 -> 2.7 ms)?
+# HYPOTHESIS, WRITTEN BEFORE RUNNING: hint's aging rule. CPU-bound threads that
+# wait > 100 ms are aged to level 0. By default that's above the io threads
+# (level 1) either way, but with iotop the io threads share level 0 with aged
+# CPU threads, so ... the direction isn't obvious to me, which is why this is a test.
+# PREDICTIONS:
+#   W1. With aging off, iotop's io p95 in `mixed` is <= the default's (the
+#       anomaly disappears). If it doesn't, aging is not the cause.
+#   W2. With aging off, the default's io p95 in `mixed` changes by < 20%
+#       (aging rarely fires with only two CPU-bound threads).
+repeat 5 bench mixed hint
+repeat 5 bench mixed hint iotop=1
+repeat 5 bench mixed hint aging=100000
+repeat 5 bench mixed hint iotop=1 aging=100000
+poweroff

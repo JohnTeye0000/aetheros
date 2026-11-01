@@ -624,7 +624,13 @@ predictions committed first. Default lines rerun as a regression check matched
   within 0.1%.
 * **H3 failed:** moving io to the top level made the io process in `all`
   near-instant (0.69 ms to 2 us), but in `mixed` (two io processes, no
-  interactive) it got *worse* (1.9 to 2.7 ms). I don't have a tested explanation.
+  interactive) it got *worse* (1.9 to 2.7 ms). **Follow-up (`plans/iotop_why.txt`,
+  20 runs, predictions committed first, both held):** the cause is `hint`'s aging
+  rule. With aging off, io p95 is 1.75 ms with or without `iotop`, and aging
+  changes the default's latency by only 8%. Aged CPU-bound threads promoted to
+  the top level now collide with the io threads there. The remaining ~1.3 ms
+  median is the two io processes queuing behind each other's bursts, the same
+  sibling floor as F16.
 * **H4 held:** the interactive process now shares its level with ~4.8 ms io
   bursts, and its p95 rose from 2 us to 818 us (still well under rr's 9.8 ms).
   The mapping is a straight trade between the two classes.

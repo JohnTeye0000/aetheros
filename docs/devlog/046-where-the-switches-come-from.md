@@ -24,3 +24,10 @@ A surprise: flat slices cut the hint scheduler's worst-case latency with ten
 competitors from 3.6 ms to 0.6 ms. That fits the aging mechanism from F11.
 When aged CPU threads tie with the interactive one, a 10 ms slice ahead of it
 is better than a 40 ms one.
+
+**Addendum.** The unexplained result got its own test, with predictions
+committed first. Turn aging off and the anomaly disappears: I/O latency is
+1.75 ms with or without promoting I/O to the top level. So aging, the same rule
+behind F11 and the scale10 surprise above, was the cause again. That makes
+three separate results traced to one anti-starvation rule I chose without
+testing.
