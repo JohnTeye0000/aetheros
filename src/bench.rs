@@ -138,6 +138,8 @@ pub struct Config {
     pub hscale: bool,
     /// `hint`: io-hinted threads share the interactive level (`iotop=1`).
     pub iotop: bool,
+    /// `hint`: graded aging, one level per aging period (`agestep=1`).
+    pub agestep: bool,
 }
 
 pub const WORKLOADS: &str = "cpu4  mixed  interactive  all  scale<N>  mix:C,W,I  mix2:C,W,I  fpu  files:a.axe+b.axe+...";
@@ -242,6 +244,7 @@ pub fn parse(args: &str) -> Result<Config, &'static str> {
         floor: scheduler::DEFAULT_FAIR_FLOOR_MS,
         hscale: true,
         iotop: false,
+        agestep: false,
     };
     for tok in it {
         // `hfair8` = hfair with an 8x slice multiplier; plain `hfair` = default.
@@ -262,6 +265,8 @@ pub fn parse(args: &str) -> Result<Config, &'static str> {
             cfg.floor = v.parse().ok().filter(|n| *n >= 1).ok_or("floor= must be >= 1 (ms)")?;
         } else if let Some(v) = tok.strip_prefix("hscale=") {
             cfg.hscale = v != "0";
+        } else if let Some(v) = tok.strip_prefix("agestep=") {
+            cfg.agestep = v != "0";
         } else if let Some(v) = tok.strip_prefix("iotop=") {
             cfg.iotop = v != "0";
         } else if let Some(v) = tok.strip_prefix("lag=") {
@@ -317,6 +322,7 @@ pub fn run(cfg: &Config) {
     scheduler::set_mlfq_levels(cfg.levels);
     scheduler::set_fair_floor_ms(cfg.floor);
     scheduler::set_hint_shape(cfg.hscale, cfg.iotop);
+    scheduler::set_hint_age_step(cfg.agestep);
     scheduler::set_quantum_ms(cfg.quantum);
     without_interrupts(|| RESULTS.lock().clear());
     QUIET.store(true, Ordering::SeqCst);
@@ -382,6 +388,9 @@ pub fn run(cfg: &Config) {
     }
     if cfg.policy == Policy::Hinted && !cfg.hscale {
         label = alloc::format!("{}-flatq", label);
+    }
+    if cfg.policy == Policy::Hinted && cfg.agestep {
+        label = alloc::format!("{}-agestep", label);
     }
     if cfg.policy == Policy::Hinted && cfg.iotop {
         label = alloc::format!("{}-iotop", label);

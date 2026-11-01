@@ -644,6 +644,38 @@ direct function of its slice length (MLFQ depth, fair's floor, hint's scaling).
 What a hint contributes is *which* threads get long slices, which is exactly
 the part `hfair` keeps.
 
+### Fixing the hint scheduler's aging (F23)
+
+Three results traced to one rule: F11's tail at ten competitors, F22's scale10
+surprise, and F22's io anomaly. In each, `hint`'s aging lifted a waiting
+CPU-bound thread straight to the top level, where it collided with interactive
+or io threads. `agestep=1` makes aging graded: one level per 100 ms period
+waited. `plans/agestep.txt`, 40 runs, predictions committed first.
+
+| | default aging | graded aging |
+|---|---|---|
+| scale10, interactive p95 | 3.6 ms | **4 us** |
+| mixed + iotop, io p95 | 2.71 ms | 1.78 ms |
+| all, correct hints, interactive p95 | 2 us | 2 us |
+| all, WRONG hints, victim p95 | 106 ms | 206 ms |
+| all, WRONG hints, victim worst first dispatch | 120 ms | 220 ms |
+| all, WRONG hints, makespan | 1,619 ms | 1,680 ms |
+
+* **G1 failed, in the good direction.** I predicted the scale10 tail would
+  shrink but stay above 100 us. It went from 3.6 ms to 4 us, as low as with
+  aging off entirely. I haven't established why the CPU threads, which wait long
+  enough to climb all the way, no longer delay the interactive one.
+* **G2 held: graded aging costs exactly what it should.** A victim of wrong
+  hints needs two periods to reach the top, so it waits ~206 ms instead of
+  ~106 ms, but it is still served (no starvation). Makespan under wrong hints
+  rises 3.8%.
+* **G3 and G4 held:** the io anomaly disappears, and nothing changes with
+  correct hints.
+
+So graded aging is the better default for `hint` when hints are usually right,
+and worse when they're wrong. It doesn't change the central comparison: `hfair`
+needs no aging at all and keeps ~3 us with wrong hints (F9).
+
 ### What this changes about the research question
 
 The question was "can compiler-derived information help the scheduler?" The

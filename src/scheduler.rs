@@ -523,6 +523,12 @@ pub fn set_hint(id: usize, hint: Hint) {
 static HINT_SCALE: AtomicBool = AtomicBool::new(true);
 /// `hint`: map io-hinted threads to the top level (`iotop=1`).
 static HINT_IO_TOP: AtomicBool = AtomicBool::new(false);
+/// `hint`: aging lifts a waiting thread one level per period (`agestep=1`)
+/// instead of straight to the top.
+static HINT_AGE_STEP: AtomicBool = AtomicBool::new(false);
+pub fn set_hint_age_step(on: bool) {
+    HINT_AGE_STEP.store(on, Ordering::SeqCst);
+}
 pub fn set_hint_shape(scale: bool, io_top: bool) {
     HINT_SCALE.store(scale, Ordering::SeqCst);
     HINT_IO_TOP.store(io_top, Ordering::SeqCst);
@@ -649,8 +655,15 @@ fn eff_level(t: &Thread, pol: Policy, now: u64) -> u8 {
         Policy::RoundRobin => 0,
         Policy::Hinted => {
             let aging = AGING_MS.load(Ordering::Relaxed) * timing::tsc_hz() / 1000;
-            if t.state == State::Ready && aging > 0 && now.saturating_sub(t.ready_since) > aging {
-                0
+            let waited = now.saturating_sub(t.ready_since);
+            if t.state == State::Ready && aging > 0 && waited > aging {
+                if HINT_AGE_STEP.load(Ordering::Relaxed) {
+                    // graded aging: up one level per aging period waited
+                    let periods = (waited / aging).min(u8::MAX as u64) as u8;
+                    t.hint.level().saturating_sub(periods)
+                } else {
+                    0
+                }
             } else {
                 t.hint.level()
             }

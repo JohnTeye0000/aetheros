@@ -188,7 +188,11 @@ see a thread that never ran. All reports now include response time and a starvat
 achieves 3\us{} against \pol{hint}'s 2\us. With many competitors, \pol{fair} is
 better at the default aging setting (5\us{} vs.\ 3.6\ms{} with ten CPU-bound
 processes). A sweep showed the hint scheduler's degradation is caused entirely by its aging
-rule. The mechanism is simple: a thread that sleeps has used little CPU, so its virtual
+rule, which lifts a waiting CPU-bound thread straight to the interactive level. Replacing
+it with graded aging (one level per 100\ms{} waited) removed that tail (3.6\ms{} to
+4\us) and two other anomalies traced to the same rule. The cost: a victim of wrong hints
+waits about twice as long before rescue (206\ms{} instead of 106\ms), though it is never
+starved. The mechanism behind \pol{fair}'s result is simple: a thread that sleeps has used little CPU, so its virtual
 runtime is small and it is picked first. The scheduler measures what the hint declares.
 \pol{fair} also handles programs that break the hint scheduler. For a program interactive in
 one phase and CPU-bound in the next, \pol{hint} gives 65\ms{} latency and \pol{fair}
